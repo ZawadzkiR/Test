@@ -1,62 +1,94 @@
 import webview
 
-def copy_text():
-    # JavaScript function to copy text
+def setup_custom_context_menu():
     js_code = """
-    function copyText() {
-        var text = window.getSelection().toString(); // Get selected text
-        var input = document.createElement('input');
-        document.body.appendChild(input);
-        input.setAttribute('value', text);
-        input.select();
-        document.execCommand('copy');
-        document.body.removeChild(input);
-    }
-    copyText();
-    """
-    # Execute JavaScript code in the webview
-    window.evaluate(js_code)
+    (function() {
+        var zoomLevel = 1;
 
-# Create and show the webview
-window = webview.create_window('My WebView', 'https://example.com')
-webview.start(copy_text)
+        // Enable text selection
+        document.body.style.userSelect = 'text';
+        document.body.style.webkitUserSelect = 'text';
+        document.body.style.msUserSelect = 'text';
+        document.body.style.mozUserSelect = 'text';
 
+        // Custom context menu
+        document.addEventListener('contextmenu', function(event) {
+            event.preventDefault();
 
-import webview
+            var menu = document.createElement('div');
+            menu.style.position = 'absolute';
+            menu.style.top = event.pageY + 'px';
+            menu.style.left = event.pageX + 'px';
+            menu.style.backgroundColor = '#f0f0f0';
+            menu.style.border = '1px solid #ccc';
+            menu.style.padding = '5px';
+            menu.style.boxShadow = '2px 2px 5px rgba(0, 0, 0, 0.2)';
+            menu.style.zIndex = 10000;
 
-def zoom_in():
-    # JavaScript function to zoom in
-    js_code = """
-    document.body.style.zoom = parseFloat(getComputedStyle(document.body).zoom || 1) + 0.1;
-    """
-    window.evaluate(js_code)
+            var copy = document.createElement('div');
+            copy.innerHTML = 'Kopiuj';
+            copy.style.padding = '5px';
+            copy.style.cursor = 'pointer';
+            copy.onclick = function() {
+                document.execCommand('copy');
+                document.body.removeChild(menu);
+            };
 
-def zoom_out():
-    # JavaScript function to zoom out
-    js_code = """
-    document.body.style.zoom = parseFloat(getComputedStyle(document.body).zoom || 1) - 0.1;
-    """
-    window.evaluate(js_code)
+            var cut = document.createElement('div');
+            cut.innerHTML = 'Wytnij';
+            cut.style.padding = '5px';
+            cut.style.cursor = 'pointer';
+            cut.onclick = function() {
+                document.execCommand('cut');
+                document.body.removeChild(menu);
+            };
 
-def setup_shortcuts():
-    # JavaScript to listen for Ctrl+ and Ctrl- shortcuts
-    js_code = """
-    document.addEventListener('keydown', function(e) {
-        if (e.ctrlKey && e.key === '+') {
-            document.body.style.zoom = parseFloat(getComputedStyle(document.body).zoom || 1) + 0.1;
-            e.preventDefault();
-        } else if (e.ctrlKey && e.key === '-') {
-            document.body.style.zoom = parseFloat(getComputedStyle(document.body).zoom || 1) - 0.1;
-            e.preventDefault();
+            var paste = document.createElement('div');
+            paste.innerHTML = 'Wklej';
+            paste.style.padding = '5px';
+            paste.style.cursor = 'pointer';
+            paste.onclick = function() {
+                document.execCommand('paste');
+                document.body.removeChild(menu);
+            };
+
+            menu.appendChild(copy);
+            menu.appendChild(cut);
+            menu.appendChild(paste);
+            document.body.appendChild(menu);
+
+            // Remove the menu if clicking outside of it
+            document.addEventListener('click', function() {
+                if (menu) {
+                    document.body.removeChild(menu);
+                }
+            }, { once: true });
+        });
+
+        function setZoom() {
+            document.body.style.transform = 'scale(' + zoomLevel + ')';
+            document.body.style.transformOrigin = '0 0';
+            document.body.style.width = (100 / zoomLevel) + '%';
         }
-    });
-    """
-    window.evaluate(js_code)
 
-def load_page():
-    # Load the page and set up shortcuts
-    setup_shortcuts()
+        document.addEventListener('keydown', function(event) {
+            if (event.ctrlKey && event.key === '+') {
+                zoomLevel += 0.1;
+                setZoom();
+                event.preventDefault();
+            } else if (event.ctrlKey && (event.key === '-' || event.key === '_')) {
+                zoomLevel = Math.max(0.1, zoomLevel - 0.1);
+                setZoom();
+                event.preventDefault();
+            }
+        });
+
+        // Initial Zoom Setup
+        setZoom();
+    })();
+    """
+    window.evaluate_js(js_code)
 
 # Create and show the webview
 window = webview.create_window('My WebView', 'https://example.com')
-webview.start(load_page)
+webview.start(setup_custom_context_menu)
