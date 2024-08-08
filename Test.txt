@@ -1,90 +1,62 @@
-import pandas as pd
-from openpyxl import Workbook
-from openpyxl.utils.dataframe import dataframe_to_rows
-from openpyxl.styles import Alignment
+import webview
 
-def create_excel_with_merged_headers(dataframe, sections, output_file):
-    # Tworzenie nowego workbooka i dodanie arkusza
-    wb = Workbook()
-    ws = wb.active
+def copy_text():
+    # JavaScript function to copy text
+    js_code = """
+    function copyText() {
+        var text = window.getSelection().toString(); // Get selected text
+        var input = document.createElement('input');
+        document.body.appendChild(input);
+        input.setAttribute('value', text);
+        input.select();
+        document.execCommand('copy');
+        document.body.removeChild(input);
+    }
+    copyText();
+    """
+    # Execute JavaScript code in the webview
+    window.evaluate(js_code)
 
-    # Zliczanie maksymalnej liczby poziomów
-    max_levels = 2
-    for section, content in sections.items():
-        if isinstance(content, dict):
-            max_levels = max(max_levels, 3)
-    
-    # Dodanie scalonych nagłówków
-    col_start = 1
-    col_mapping = {}
-    for section, content in sections.items():
-        if isinstance(content, dict):
-            section_start = col_start
-            for subsection, columns in content.items():
-                col_end = col_start + len(columns) - 1
-                # Scalenie nagłówka dla podsekcji
-                ws.merge_cells(start_row=2, start_column=col_start, end_row=2, end_column=col_end)
-                ws.cell(row=2, column=col_start).value = subsection
-                ws.cell(row=2, column=col_start).alignment = Alignment(horizontal='center', vertical='center')
-
-                # Dodanie nazw kolumn poniżej scalonego nagłówka
-                for col_idx, col_name in enumerate(columns, start=col_start):
-                    ws.cell(row=3, column=col_idx).value = col_name
-                    col_mapping[col_name] = col_idx
-
-                col_start = col_end + 1
-            
-            section_end = col_start - 1
-            # Scalenie nagłówka dla sekcji
-            ws.merge_cells(start_row=1, start_column=section_start, end_row=1, end_column=section_end)
-            ws.cell(row=1, column=section_start).value = section
-            ws.cell(row=1, column=section_start).alignment = Alignment(horizontal='center', vertical='center')
-        else:
-            # Jeśli sekcja nie ma podsekcji, skalowanie nagłówka tylko dla sekcji
-            col_end = col_start + len(content) - 1
-            ws.merge_cells(start_row=1, start_column=col_start, end_row=2, end_column=col_end)
-            ws.cell(row=1, column=col_start).value = section
-            ws.cell(row=1, column=col_start).alignment = Alignment(horizontal='center', vertical='center')
-
-            # Dodanie nazw kolumn poniżej scalonego nagłówka
-            for col_idx, col_name in enumerate(content, start=col_start):
-                ws.cell(row=3, column=col_idx).value = col_name
-                col_mapping[col_name] = col_idx
-
-            col_start = col_end + 1
-
-    # Dodanie danych z dataframe
-    for r_idx, row in enumerate(dataframe_to_rows(dataframe, index=False, header=False), start=4):
-        for c_idx, value in enumerate(row, start=1):
-            ws.cell(row=r_idx, column=col_mapping[dataframe.columns[c_idx - 1]]).value = value
-
-    # Zapisanie pliku
-    wb.save(output_file)
-
-# Przykładowe użycie funkcji
-df = pd.DataFrame({
-    'id': [1, 2, 3],
-    'adres': ['Adres 1', 'Adres 2', 'Adres 3'],
-    'kwota': [100, 200, 300],
-    'data': ['2023-01-01', '2023-02-01', '2023-03-01'],
-    'adres1': ['Adres 1', 'Adres 2', 'Adres 3'],
-    'id2': [4, 5, 6],
-    'adres2': ['Adres 4', 'Adres 5', 'Adres 6']
-})
-
-sections = {
-    'Klient': {
-        'Dane Podstawowe': ['id', 'adres']
-    },
-    'Transakcje': {
-        'Finanse': ['kwota', 'data', 'adres1'],
-        'Finanse2': ['kwota', 'data', 'adres1']
-    },
-    'Klient2': ['id2', 'adres2']
-}
-
-create_excel_with_merged_headers(df, sections, 'output.xlsx')
+# Create and show the webview
+window = webview.create_window('My WebView', 'https://example.com')
+webview.start(copy_text)
 
 
+import webview
 
+def zoom_in():
+    # JavaScript function to zoom in
+    js_code = """
+    document.body.style.zoom = parseFloat(getComputedStyle(document.body).zoom || 1) + 0.1;
+    """
+    window.evaluate(js_code)
 
+def zoom_out():
+    # JavaScript function to zoom out
+    js_code = """
+    document.body.style.zoom = parseFloat(getComputedStyle(document.body).zoom || 1) - 0.1;
+    """
+    window.evaluate(js_code)
+
+def setup_shortcuts():
+    # JavaScript to listen for Ctrl+ and Ctrl- shortcuts
+    js_code = """
+    document.addEventListener('keydown', function(e) {
+        if (e.ctrlKey && e.key === '+') {
+            document.body.style.zoom = parseFloat(getComputedStyle(document.body).zoom || 1) + 0.1;
+            e.preventDefault();
+        } else if (e.ctrlKey && e.key === '-') {
+            document.body.style.zoom = parseFloat(getComputedStyle(document.body).zoom || 1) - 0.1;
+            e.preventDefault();
+        }
+    });
+    """
+    window.evaluate(js_code)
+
+def load_page():
+    # Load the page and set up shortcuts
+    setup_shortcuts()
+
+# Create and show the webview
+window = webview.create_window('My WebView', 'https://example.com')
+webview.start(load_page)
