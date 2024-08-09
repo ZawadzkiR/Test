@@ -1,8 +1,4 @@
-import webview
-
-def setup_custom_context_menu():
-    js_code = """
-    (function() {
+    function applyCustomFeatures() {
         var zoomLevel = 1;
 
         // Enable text selection
@@ -85,10 +81,10 @@ def setup_custom_context_menu():
 
         // Initial Zoom Setup
         setZoom();
-    })();
-    """
-    window.evaluate_js(js_code)
+    }
 
-# Create and show the webview
-window = webview.create_window('My WebView', 'https://example.com')
-webview.start(setup_custom_context_menu)
+    // Apply features initially
+    applyCustomFeatures();
+
+    // Reapply features after each page load
+    window.addEventListener('load', applyCustomFeatures);
