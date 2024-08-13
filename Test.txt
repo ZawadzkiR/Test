@@ -3,45 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Flask Form with Spinner</title>
-    <!-- Bootstrap CSS -->
-    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        #loadingSpinner {
-            display: none;
-            position: fixed;
-            z-index: 9999;
-            width: 100%;
-            height: 100%;
-            top: 0;
-            left: 0;
-            background-color: rgba(255, 255, 255, 0.7);
-            justify-content: center;
-            align-items: center;
-        }
-    </style>
+    <title>Załączniki z JIRA</title>
     <script>
-        function showLoadingSpinner() {
-            document.getElementById('loadingSpinner').style.display = 'flex';
+        function downloadAttachment(url, filename) {
+            fetch(url, { method: 'GET' })
+                .then(response => response.blob())
+                .then(blob => {
+                    const link = document.createElement('a');
+                    link.href = window.URL.createObjectURL(blob);
+                    link.download = filename;
+                    link.click();
+                    window.URL.revokeObjectURL(link.href);
+                })
+                .catch(error => console.error('Error downloading file:', error));
         }
     </script>
 </head>
 <body>
-    <div id="loadingSpinner">
-        <div class="spinner-border text-primary" role="status">
-            <span class="sr-only">Loading...</span>
-        </div>
-    </div>
-
-    <div class="container">
-        <form method="POST" action="{{ url_for('index') }}" onsubmit="showLoadingSpinner();">
-            <button type="submit" class="btn btn-primary">Wyślij</button>
-            <button type="button" class="btn btn-secondary">Inny przycisk</button>
-        </form>
-    </div>
-
-    <!-- Bootstrap JS i jQuery -->
-    <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.2/dist/js/bootstrap.bundle.min.js"></script>
+    <h1>Lista załączników</h1>
+    <ul>
+        {% for attachment in attachments %}
+        <li><a href="#" onclick="downloadAttachment('{{ url_for('download_attachment', attachment_id=attachment.id) }}', '{{ attachment.filename }}')">Pobierz {{ attachment.filename }}</a></li>
+        {% endfor %}
+    </ul>
 </body>
 </html>
