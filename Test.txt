@@ -1,3 +1,5 @@
+<script>
+document.addEventListener("DOMContentLoaded", function() {
     function applyCustomFeatures() {
         var zoomLevel = 1;
 
@@ -86,6 +88,8 @@
     // Apply features initially
     applyCustomFeatures();
 
-    // Reapply features after each page load
-    window.addEventListener('load', applyCustomFeatures);
-    window.addEventListener('DOMContentLoaded', applyCustomFeatures);
+    // Observe changes in the document to reapply features on navigation
+    const observer = new MutationObserver(applyCustomFeatures);
+    observer.observe(document, { childList: true, subtree: true });
+});
+</script>
