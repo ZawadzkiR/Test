@@ -83,23 +83,9 @@
         setZoom();
     }
 
-    function applyOnEveryPage() {
-        applyCustomFeatures();
+    // Apply features initially
+    applyCustomFeatures();
 
-        // Observe for new page loads (URL changes)
-        let lastUrl = location.href; 
-        new MutationObserver(() => {
-            const url = location.href;
-            if (url !== lastUrl) {
-                lastUrl = url;
-                applyCustomFeatures();
-            }
-        }).observe(document, {subtree: true, childList: true});
-    }
-
-    applyOnEveryPage();
-
-    // Reapply features after each page load or DOM content loaded
-    window.addEventListener('DOMContentLoaded', applyOnEveryPage);
-    window.addEventListener('load', applyOnEveryPage);
-    """
+    // Reapply features after each page load
+    window.addEventListener('load', applyCustomFeatures);
+    window.addEventListener('DOMContentLoaded', applyCustomFeatures);
