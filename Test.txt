@@ -1,19 +1,110 @@
-import webview
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    function applyCustomFeatures() {
+        var zoomLevel = 1;
 
-# Funkcja JavaScript do obsługi Ctrl + Backspace
-js_code = """
-document.addEventListener('keydown', function(event) {
-    if (event.ctrlKey && event.key === 'Backspace') {
-        window.history.back();
+        // Enable text selection
+        document.body.style.userSelect = 'text';
+        document.body.style.webkitUserSelect = 'text';
+        document.body.style.msUserSelect = 'text';
+        document.body.style.mozUserSelect = 'text';
+
+        // Custom context menu
+        document.addEventListener('contextmenu', function(event) {
+            event.preventDefault();
+
+            var menu = document.createElement('div');
+            menu.style.position = 'absolute';
+            menu.style.top = event.pageY + 'px';
+            menu.style.left = event.pageX + 'px';
+            menu.style.backgroundColor = '#f0f0f0';
+            menu.style.border = '1px solid #ccc';
+            menu.style.padding = '5px';
+            menu.style.boxShadow = '2px 2px 5px rgba(0, 0, 0, 0.2)';
+            menu.style.zIndex = 10000;
+
+            var selectedText = window.getSelection().toString();
+
+            var copy = document.createElement('div');
+            copy.innerHTML = 'Kopiuj';
+            copy.style.padding = '5px';
+            copy.style.cursor = 'pointer';
+            copy.onclick = function() {
+                navigator.clipboard.writeText(selectedText).then(function() {
+                    console.log('Text copied to clipboard');
+                }).catch(function(err) {
+                    console.error('Could not copy text: ', err);
+                });
+                document.body.removeChild(menu);
+            };
+
+            var cut = document.createElement('div');
+            cut.innerHTML = 'Wytnij';
+            cut.style.padding = '5px';
+            cut.style.cursor = 'pointer';
+            cut.onclick = function() {
+                navigator.clipboard.writeText(selectedText).then(function() {
+                    console.log('Text cut to clipboard');
+                    document.execCommand('cut');
+                }).catch(function(err) {
+                    console.error('Could not cut text: ', err);
+                });
+                document.body.removeChild(menu);
+            };
+
+            var paste = document.createElement('div');
+            paste.innerHTML = 'Wklej';
+            paste.style.padding = '5px';
+            paste.style.cursor = 'pointer';
+            paste.onclick = function() {
+                navigator.clipboard.readText().then(function(text) {
+                    document.execCommand('insertText', false, text);
+                }).catch(function(err) {
+                    console.error('Could not paste text: ', err);
+                });
+                document.body.removeChild(menu);
+            };
+
+            menu.appendChild(copy);
+            menu.appendChild(cut);
+            menu.appendChild(paste);
+            document.body.appendChild(menu);
+
+            // Remove the menu if clicking outside of it
+            document.addEventListener('click', function() {
+                if (menu) {
+                    document.body.removeChild(menu);
+                }
+            }, { once: true });
+        });
+
+        function setZoom() {
+            document.body.style.transform = 'scale(' + zoomLevel + ')';
+            document.body.style.transformOrigin = '0 0';
+            document.body.style.width = (100 / zoomLevel) + '%';
+        }
+
+        document.addEventListener('keydown', function(event) {
+            if (event.ctrlKey && event.key === '+') {
+                zoomLevel += 0.1;
+                setZoom();
+                event.preventDefault();
+            } else if (event.ctrlKey && (event.key === '-' || event.key === '_')) {
+                zoomLevel = Math.max(0.1, zoomLevel - 0.1);
+                setZoom();
+                event.preventDefault();
+            }
+        });
+
+        // Initial Zoom Setup
+        setZoom();
     }
+
+    // Apply features initially
+    applyCustomFeatures();
+
+    // Observe changes in the document to reapply features on navigation
+    const observer = new MutationObserver(applyCustomFeatures);
+    observer.observe(document, { childList: true, subtree: true });
 });
-"""
-
-def on_loaded():
-    # Inicjalizacja funkcji JavaScript po załadowaniu okna
-    webview.windows[0].evaluate_js(js_code)
-
-if __name__ == '__main__':
-    # Uruchomienie okna pywebview
-    window = webview.create_window('PyWebView Example', 'https://example.com', width=800, height=600)
-    webview.start(on_loaded)
+</script>
