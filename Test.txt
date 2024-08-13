@@ -1,91 +1,19 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Załączniki z JIRA</title>
-    <script>
-        function downloadAttachment(fileUrl, fileName) {
-            // Tworzymy URL do trasy Flask z parametrami
-            const downloadUrl = `/download?url=${encodeURIComponent(fileUrl)}&name=${encodeURIComponent(fileName)}`;
-
-            // Wysyłamy zapytanie do trasy Flask
-            fetch(downloadUrl, { method: 'GET' })
-                .then(response => {
-                    if (response.ok) {
-                        return response.blob();
-                    } else {
-                        throw new Error('Failed to download file');
-                    }
-                })
-                .then(blob => {
-                    const link = document.createElement('a');
-                    link.href = window.URL.createObjectURL(blob);
-                    link.download = fileName;
-                    link.click();
-                    window.URL.revokeObjectURL(link.href);
-                })
-                .catch(error => console.error('Error downloading file:', error));
-        }
-    </script>
-</head>
-<body>
-    <h1>Lista załączników</h1>
-    <ul>
-        {% for attachment in attachments %}
-        <li><a href="#" onclick="downloadAttachment('{{ attachment.url }}', '{{ attachment.filename }}')">Pobierz {{ attachment.filename }}</a></li>
-        {% endfor %}
-    </ul>
-</body>
-</html>
-
-
-from flask import Flask, request, abort, send_file
-import requests
-from requests.auth import HTTPBasicAuth
-import io
-import threading
 import webview
 
-app = Flask(__name__)
+# Funkcja JavaScript do obsługi Ctrl + Backspace
+js_code = """
+document.addEventListener('keydown', function(event) {
+    if (event.ctrlKey && event.key === 'Backspace') {
+        window.history.back();
+    }
+});
+"""
 
-# Ustawienia JIRA
-JIRA_DOMAIN = 'your-jira-domain.atlassian.net'
-API_TOKEN = 'your_api_token'
-EMAIL = 'your_email@example.com'
-
-# Przykładowa lista załączników
-attachments = [
-    {'filename': 'file1.txt', 'url': 'https://your-jira-domain.atlassian.net/secure/attachment/attachment_id_1/file1.txt'},
-    {'filename': 'file2.pdf', 'url': 'https://your-jira-domain.atlassian.net/secure/attachment/attachment_id_2/file2.pdf'}
-]
-
-@app.route('/')
-def index():
-    return render_template('index.html', attachments=attachments)
-
-@app.route('/download')
-def download_attachment():
-    file_url = request.args.get('url')
-    file_name = request.args.get('name')
-
-    if not file_url or not file_name:
-        abort(400, description="Missing file URL or name")
-
-    response = requests.get(file_url, auth=HTTPBasicAuth(EMAIL, API_TOKEN))
-    
-    if response.status_code == 200:
-        return send_file(io.BytesIO(response.content), attachment_filename=file_name, as_attachment=True)
-    else:
-        abort(response.status_code, description="Failed to retrieve the attachment")
-
-def run_flask():
-    app.run(debug=True)
+def on_loaded():
+    # Inicjalizacja funkcji JavaScript po załadowaniu okna
+    webview.windows[0].evaluate_js(js_code)
 
 if __name__ == '__main__':
-    # Uruchamianie Flask w osobnym wątku
-    threading.Thread(target=run_flask).start()
-
-    # Uruchamianie pywebview
-    webview.create_window('Flask App', 'http://127.0.0.1:5000')
-    webview.start()
+    # Uruchomienie okna pywebview
+    window = webview.create_window('PyWebView Example', 'https://example.com', width=800, height=600)
+    webview.start(on_loaded)
