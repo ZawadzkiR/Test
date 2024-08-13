@@ -1,17 +1,18 @@
-    <script>
         function disableButtons() {
             // Znajdź wszystkie przyciski na stronie
             const buttons = document.querySelectorAll("button");
 
             // Przeiteruj przez wszystkie przyciski
             buttons.forEach(button => {
-                // Zmień klasę na 'btn btn-primary disabled'
-                button.className = 'btn btn-primary disabled';
+                // Sprawdź, czy przycisk ma klasę 'btn-primary'
+                if (button.classList.contains('btn-primary')) {
+                    // Zmień klasę na 'btn btn-primary disabled'
+                    button.classList.add('disabled');
 
-                // Zmieniamy tekst na "loading..." dla przycisku submit
-                if (button.type === "submit") {
-                    button.innerText = "Loading...";
+                    // Zmieniamy tekst na "Loading..." dla przycisku submit
+                    if (button.type === "submit") {
+                        button.innerText = "Loading...";
+                    }
                 }
             });
         }
-    </script>
