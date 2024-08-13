@@ -1,95 +1,18 @@
-<script>
-document.addEventListener("DOMContentLoaded", function() {
-    function applyCustomFeatures() {
-        var zoomLevel = 1;
-
-        // Enable text selection
-        document.body.style.userSelect = 'text';
-        document.body.style.webkitUserSelect = 'text';
-        document.body.style.msUserSelect = 'text';
-        document.body.style.mozUserSelect = 'text';
-
-        // Custom context menu
-        document.addEventListener('contextmenu', function(event) {
-            event.preventDefault();
-
-            var menu = document.createElement('div');
-            menu.style.position = 'absolute';
-            menu.style.top = event.pageY + 'px';
-            menu.style.left = event.pageX + 'px';
-            menu.style.backgroundColor = '#f0f0f0';
-            menu.style.border = '1px solid #ccc';
-            menu.style.padding = '5px';
-            menu.style.boxShadow = '2px 2px 5px rgba(0, 0, 0, 0.2)';
-            menu.style.zIndex = 10000;
-
-            var copy = document.createElement('div');
-            copy.innerHTML = 'Kopiuj';
-            copy.style.padding = '5px';
-            copy.style.cursor = 'pointer';
-            copy.onclick = function() {
-                document.execCommand('copy');
-                document.body.removeChild(menu);
-            };
-
-            var cut = document.createElement('div');
-            cut.innerHTML = 'Wytnij';
-            cut.style.padding = '5px';
-            cut.style.cursor = 'pointer';
-            cut.onclick = function() {
-                document.execCommand('cut');
-                document.body.removeChild(menu);
-            };
-
-            var paste = document.createElement('div');
-            paste.innerHTML = 'Wklej';
-            paste.style.padding = '5px';
-            paste.style.cursor = 'pointer';
-            paste.onclick = function() {
-                document.execCommand('paste');
-                document.body.removeChild(menu);
-            };
-
-            menu.appendChild(copy);
-            menu.appendChild(cut);
-            menu.appendChild(paste);
-            document.body.appendChild(menu);
-
-            // Remove the menu if clicking outside of it
-            document.addEventListener('click', function() {
-                if (menu) {
-                    document.body.removeChild(menu);
-                }
-            }, { once: true });
-        });
-
-        function setZoom() {
-            document.body.style.transform = 'scale(' + zoomLevel + ')';
-            document.body.style.transformOrigin = '0 0';
-            document.body.style.width = (100 / zoomLevel) + '%';
+    <style>
+        .disabled-button {
+            pointer-events: none;
+            opacity: 0.6;
         }
+    </style>
+    <script>
+        function disableButtons() {
+            // Znajdź wszystkie przyciski na stronie
+            const buttons = document.querySelectorAll("button");
 
-        document.addEventListener('keydown', function(event) {
-            if (event.ctrlKey && event.key === '+') {
-                zoomLevel += 0.1;
-                setZoom();
-                event.preventDefault();
-            } else if (event.ctrlKey && (event.key === '-' || event.key === '_')) {
-                zoomLevel = Math.max(0.1, zoomLevel - 0.1);
-                setZoom();
-                event.preventDefault();
-            }
-        });
-
-        // Initial Zoom Setup
-        setZoom();
-    }
-
-    // Apply features initially
-    applyCustomFeatures();
-
-    // Observe changes in the document to reapply features on navigation
-    const observer = new MutationObserver(applyCustomFeatures);
-    observer.observe(document, { childList: true, subtree: true });
-});
-</script>
+            // Przeiteruj i zablokuj każdy z nich
+            buttons.forEach(button => {
+                button.classList.add('disabled-button');
+                button.disabled = true;
+            });
+        }
+    </script>
