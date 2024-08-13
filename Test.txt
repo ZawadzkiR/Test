@@ -9,10 +9,15 @@
             // Znajdź wszystkie przyciski na stronie
             const buttons = document.querySelectorAll("button");
 
-            // Przeiteruj i zablokuj każdy z nich
+            // Przeiteruj przez wszystkie przyciski
             buttons.forEach(button => {
                 button.classList.add('disabled-button');
                 button.disabled = true;
+
+                // Zmieniamy tekst na "loading..."
+                if (button.type === "submit") {
+                    button.innerText = "Loading...";
+                }
             });
         }
     </script>
