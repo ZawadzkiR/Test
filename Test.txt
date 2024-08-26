@@ -1,71 +1,85 @@
-from flask import Flask, render_template, request, redirect
-import configparser
 
-app = Flask(__name__)
+import os
+import shutil
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import winshell
+from pathlib import Path
 
-# Funkcja do wczytywania konfiguracji z pliku config.ini
-def load_config():
-    config = configparser.ConfigParser()
-    config.read('config.ini')
-    return config
-
-# Funkcja do zapisywania konfiguracji do pliku config.ini
-def save_config(config):
-    with open('config.ini', 'w') as configfile:
-        config.write(configfile)
-
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    config = load_config()
-
-    if request.method == 'POST':
-        # Odczytanie danych z formularza
-        new_path = request.form['sciezka_do_bazy']
-        new_login = request.form['login']
-        new_password = request.form['haslo']
-
-        # Aktualizacja konfiguracji
-        config['DEFAULT']['sciezka_do_bazy'] = new_path
-        config['DEFAULT']['login'] = new_login
-        if new_password:
-            config['DEFAULT']['haslo'] = new_password
-
-        # Zapisanie nowych ustawień do pliku
-        save_config(config)
-
-        return redirect('/')
-
-    # Wczytywanie danych z config.ini
-    sciezka_do_bazy = config['DEFAULT']['sciezka_do_bazy']
-    login = config['DEFAULT']['login']
-
-    return render_template('index.html', sciezka_do_bazy=sciezka_do_bazy, login=login)
-
-if __name__ == '__main__':
-    app.run(debug=True)
-
-
-
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ustawienia</title>
-</head>
-<body>
-    <h1>Ustawienia</h1>
-    <form method="POST">
-        <label for="sciezka_do_bazy">Ścieżka do bazy:</label>
-        <input type="text" id="sciezka_do_bazy" name="sciezka_do_bazy" value="{{ sciezka_do_bazy }}"><br><br>
+class InstallerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Simple Installer")
         
-        <label for="login">Login:</label>
-        <input type="text" id="login" name="login" value="{{ login }}"><br><br>
+        # Ustawienia okna
+        self.root.geometry("400x200")
+        
+        # Label z instrukcją
+        self.label = tk.Label(root, text="Wybierz katalog instalacji:")
+        self.label.pack(pady=10)
 
-        <label for="haslo">Hasło:</label>
-        <input type="password" id="haslo" name="haslo" placeholder="Nowe hasło"><br><br>
+        # Przycisk do wyboru katalogu instalacji
+        self.install_dir_button = tk.Button(root, text="Wybierz katalog", command=self.choose_directory)
+        self.install_dir_button.pack(pady=10)
 
-        <input type="submit" value="Zmień">
-    </form>
-</body>
-</html>
+        # Checkboxy do opcji skrótów
+        self.desktop_var = tk.BooleanVar()
+        self.start_menu_var = tk.BooleanVar()
+        self.desktop_check = tk.Checkbutton(root, text="Dodaj skrót na pulpit", variable=self.desktop_var)
+        self.desktop_check.pack(pady=5)
+        self.start_menu_check = tk.Checkbutton(root, text="Dodaj skrót do menu Start", variable=self.start_menu_var)
+        self.start_menu_check.pack(pady=5)
+
+        # Przycisk instalacji
+        self.install_button = tk.Button(root, text="Zainstaluj", command=self.install)
+        self.install_button.pack(pady=20)
+
+        self.install_dir = ""
+
+    def choose_directory(self):
+        self.install_dir = filedialog.askdirectory()
+        if self.install_dir:
+            self.label.config(text=f"Instalacja w: {self.install_dir}")
+
+    def install(self):
+        if not self.install_dir:
+            messagebox.showerror("Błąd", "Nie wybrano katalogu instalacji!")
+            return
+
+        # Ścieżka do plików do zainstalowania
+        source_dir = os.path.join(os.getcwd(), "files")  # Zakładamy, że pliki do instalacji są w katalogu "files"
+        
+        try:
+            # Kopiowanie plików
+            if os.path.exists(source_dir):
+                shutil.copytree(source_dir, self.install_dir, dirs_exist_ok=True)
+
+            # Tworzenie skrótu na pulpit
+            if self.desktop_var.get():
+                desktop_path = winshell.desktop()
+                shortcut = os.path.join(desktop_path, "YourApp.lnk")
+                target = os.path.join(self.install_dir, "your_app.exe")
+                self.create_shortcut(target, shortcut)
+            
+            # Tworzenie skrótu w menu Start
+            if self.start_menu_var.get():
+                start_menu_path = winshell.start_menu()
+                shortcut = os.path.join(start_menu_path, "YourApp.lnk")
+                target = os.path.join(self.install_dir, "your_app.exe")
+                self.create_shortcut(target, shortcut)
+
+            messagebox.showinfo("Sukces", "Instalacja zakończona pomyślnie!")
+
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Instalacja nie powiodła się: {str(e)}")
+
+    def create_shortcut(self, target, shortcut):
+        from winshell import Shortcut
+        with Shortcut(shortcut) as link:
+            link.path = target
+            link.description = "YourApp"
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = InstallerApp(root)
+    root.mainloop()
