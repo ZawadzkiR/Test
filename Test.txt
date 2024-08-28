@@ -1,85 +1,38 @@
+import ipywidgets as widgets
+from IPython.display import display
+import subprocess
 
-import os
-import shutil
-import tkinter as tk
-from tkinter import filedialog, messagebox
-import winshell
-from pathlib import Path
+# Przykładowy słownik z nazwami procesów i ścieżkami do plików .py
+processes = {
+    'Proces 1': '/path/to/script1.py',
+    'Proces 2': '/path/to/script2.py',
+    'Proces 3': '/path/to/script3.py',
+}
 
-class InstallerApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Simple Installer")
-        
-        # Ustawienia okna
-        self.root.geometry("400x200")
-        
-        # Label z instrukcją
-        self.label = tk.Label(root, text="Wybierz katalog instalacji:")
-        self.label.pack(pady=10)
+# Funkcja do uruchamiania skryptów
+def run_process(path):
+    try:
+        subprocess.run(['python3', path], check=True)
+        print(f'Uruchomiono {path}')
+    except subprocess.CalledProcessError as e:
+        print(f'Błąd podczas uruchamiania {path}: {e}')
 
-        # Przycisk do wyboru katalogu instalacji
-        self.install_dir_button = tk.Button(root, text="Wybierz katalog", command=self.choose_directory)
-        self.install_dir_button.pack(pady=10)
+# Lista widgetów do wyświetlenia
+widgets_list = []
 
-        # Checkboxy do opcji skrótów
-        self.desktop_var = tk.BooleanVar()
-        self.start_menu_var = tk.BooleanVar()
-        self.desktop_check = tk.Checkbutton(root, text="Dodaj skrót na pulpit", variable=self.desktop_var)
-        self.desktop_check.pack(pady=5)
-        self.start_menu_check = tk.Checkbutton(root, text="Dodaj skrót do menu Start", variable=self.start_menu_var)
-        self.start_menu_check.pack(pady=5)
+# Tworzenie nagłówków tabeli
+header = widgets.HBox([widgets.Label('Nazwa procesu'), widgets.Label('Uruchomienie procesu')])
+widgets_list.append(header)
 
-        # Przycisk instalacji
-        self.install_button = tk.Button(root, text="Zainstaluj", command=self.install)
-        self.install_button.pack(pady=20)
+# Tworzenie wierszy z nazwami procesów i guzikami
+for name, path in processes.items():
+    button = widgets.Button(description='Uruchom')
+    
+    # Przypisanie funkcji uruchamiania do guzika
+    button.on_click(lambda b, p=path: run_process(p))
+    
+    row = widgets.HBox([widgets.Label(name), button])
+    widgets_list.append(row)
 
-        self.install_dir = ""
-
-    def choose_directory(self):
-        self.install_dir = filedialog.askdirectory()
-        if self.install_dir:
-            self.label.config(text=f"Instalacja w: {self.install_dir}")
-
-    def install(self):
-        if not self.install_dir:
-            messagebox.showerror("Błąd", "Nie wybrano katalogu instalacji!")
-            return
-
-        # Ścieżka do plików do zainstalowania
-        source_dir = os.path.join(os.getcwd(), "files")  # Zakładamy, że pliki do instalacji są w katalogu "files"
-        
-        try:
-            # Kopiowanie plików
-            if os.path.exists(source_dir):
-                shutil.copytree(source_dir, self.install_dir, dirs_exist_ok=True)
-
-            # Tworzenie skrótu na pulpit
-            if self.desktop_var.get():
-                desktop_path = winshell.desktop()
-                shortcut = os.path.join(desktop_path, "YourApp.lnk")
-                target = os.path.join(self.install_dir, "your_app.exe")
-                self.create_shortcut(target, shortcut)
-            
-            # Tworzenie skrótu w menu Start
-            if self.start_menu_var.get():
-                start_menu_path = winshell.start_menu()
-                shortcut = os.path.join(start_menu_path, "YourApp.lnk")
-                target = os.path.join(self.install_dir, "your_app.exe")
-                self.create_shortcut(target, shortcut)
-
-            messagebox.showinfo("Sukces", "Instalacja zakończona pomyślnie!")
-
-        except Exception as e:
-            messagebox.showerror("Błąd", f"Instalacja nie powiodła się: {str(e)}")
-
-    def create_shortcut(self, target, shortcut):
-        from winshell import Shortcut
-        with Shortcut(shortcut) as link:
-            link.path = target
-            link.description = "YourApp"
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = InstallerApp(root)
-    root.mainloop()
+# Wyświetlenie całej tabeli
+display(widgets.VBox(widgets_list))
