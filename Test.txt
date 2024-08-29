@@ -1,6 +1,7 @@
 import ipywidgets as widgets
 from IPython.display import display
 import subprocess
+from IPython.display import Javascript
 
 # Przykładowy słownik z nazwami procesów i ścieżkami do plików .py
 processes = {
@@ -9,30 +10,59 @@ processes = {
     'Proces 3': '/path/to/script3.py',
 }
 
+# Wyjście na komunikaty
+output = widgets.Output()
+
+# Flaga do blokowania uruchamiania innych procesów
+running = False
+
 # Funkcja do uruchamiania skryptów
 def run_process(path):
+    global running
+    if running:
+        with output:
+            output.clear_output()
+            print("Inny proces jest już uruchomiony. Proszę poczekać.")
+        return
+    
+    running = True
+    with output:
+        output.clear_output()
+        print(f'Uruchamianie {path}...')
+        
     try:
-        subprocess.run(['python3', path], check=True)
-        print(f'Uruchomiono {path}')
+        result = subprocess.run(['python3', path], check=True, capture_output=True, text=True)
+        with output:
+            output.clear_output()
+            print(f'Proces {path} zakończony sukcesem.\n\nWyjście:\n{result.stdout}')
     except subprocess.CalledProcessError as e:
-        print(f'Błąd podczas uruchamiania {path}: {e}')
+        with output:
+            output.clear_output()
+            print(f'Błąd podczas uruchamiania {path}:\n{e.stderr}')
+    finally:
+        running = False
 
 # Lista widgetów do wyświetlenia
 widgets_list = []
 
-# Tworzenie nagłówków tabeli
-header = widgets.HBox([widgets.Label('Nazwa procesu'), widgets.Label('Uruchomienie procesu')])
+# Tworzenie nagłówków tabeli z stylizacją
+header = widgets.HBox([widgets.HTML('<b>Nazwa procesu</b>'), widgets.HTML('<b>Uruchomienie procesu</b>')],
+                      layout=widgets.Layout(justify_content='space-between', padding='10px', border='solid 1px black', background_color='#f0f0f0'))
 widgets_list.append(header)
 
 # Tworzenie wierszy z nazwami procesów i guzikami
 for name, path in processes.items():
-    button = widgets.Button(description='Uruchom')
+    button = widgets.Button(description='Uruchom', layout=widgets.Layout(width='auto'))
     
     # Przypisanie funkcji uruchamiania do guzika
     button.on_click(lambda b, p=path: run_process(p))
     
-    row = widgets.HBox([widgets.Label(name), button])
+    row = widgets.HBox([widgets.Label(name), button],
+                       layout=widgets.Layout(justify_content='space-between', padding='10px', border='solid 1px black'))
     widgets_list.append(row)
 
-# Wyświetlenie całej tabeli
-display(widgets.VBox(widgets_list))
+# Tabela z wyjściem na dole
+table = widgets.VBox(widgets_list, layout=widgets.Layout(width='50%', margin='auto'))
+
+# Wyświetlenie całej tabeli oraz pola wyjścia
+display(table, output)
