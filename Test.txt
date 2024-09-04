@@ -1,68 +1,58 @@
-import ipywidgets as widgets
-from IPython.display import display
-import subprocess
-from IPython.display import Javascript
+import pandas as pd
 
-# Przykładowy słownik z nazwami procesów i ścieżkami do plików .py
-processes = {
-    'Proces 1': '/path/to/script1.py',
-    'Proces 2': '/path/to/script2.py',
-    'Proces 3': '/path/to/script3.py',
-}
+def porownaj_dataframe(df1, df2, keys):
+    # Sprawdzenie, czy kolumny kluczowe są obecne w obu dataframe'ach
+    for key in keys:
+        if key not in df1.columns or key not in df2.columns:
+            raise ValueError(f"Kolumna kluczowa '{key}' nie znajduje się w jednym z dataframe'ów.")
 
-# Wyjście na komunikaty
-output = widgets.Output()
-
-# Flaga do blokowania uruchamiania innych procesów
-running = False
-
-# Funkcja do uruchamiania skryptów
-def run_process(path):
-    global running
-    if running:
-        with output:
-            output.clear_output()
-            print("Inny proces jest już uruchomiony. Proszę poczekać.")
-        return
+    # Wykonanie full outer join na podanych kolumnach kluczowych
+    merged_df = pd.merge(df1, df2, on=keys, how='outer', suffixes=('_df1', '_df2'))
     
-    running = True
-    with output:
-        output.clear_output()
-        print(f'Uruchamianie {path}...')
-        
-    try:
-        result = subprocess.run(['python3', path], check=True, capture_output=True, text=True)
-        with output:
-            output.clear_output()
-            print(f'Proces {path} zakończony sukcesem.\n\nWyjście:\n{result.stdout}')
-    except subprocess.CalledProcessError as e:
-        with output:
-            output.clear_output()
-            print(f'Błąd podczas uruchamiania {path}:\n{e.stderr}')
-    finally:
-        running = False
+    # Przygotowanie kolumn porównawczych (wszystkie kolumny oprócz kluczy)
+    comparison_cols = [col for col in df1.columns if col not in keys]
 
-# Lista widgetów do wyświetlenia
-widgets_list = []
-
-# Tworzenie nagłówków tabeli z stylizacją
-header = widgets.HBox([widgets.HTML('<b>Nazwa procesu</b>'), widgets.HTML('<b>Uruchomienie procesu</b>')],
-                      layout=widgets.Layout(justify_content='space-between', padding='10px', border='solid 1px black', background_color='#f0f0f0'))
-widgets_list.append(header)
-
-# Tworzenie wierszy z nazwami procesów i guzikami
-for name, path in processes.items():
-    button = widgets.Button(description='Uruchom', layout=widgets.Layout(width='auto'))
+    # Tworzenie maski różnic
+    diff_mask = pd.DataFrame(index=merged_df.index)
+    for col in comparison_cols:
+        col_df1 = col + '_df1'
+        col_df2 = col + '_df2'
+        diff_mask[col] = merged_df[col_df1].ne(merged_df[col_df2])
     
-    # Przypisanie funkcji uruchamiania do guzika
-    button.on_click(lambda b, p=path: run_process(p))
+    # Filtracja tylko tych wierszy, w których są różnice
+    rows_with_differences = diff_mask.any(axis=1)
+    comparison_df = merged_df[rows_with_differences]
     
-    row = widgets.HBox([widgets.Label(name), button],
-                       layout=widgets.Layout(justify_content='space-between', padding='10px', border='solid 1px black'))
-    widgets_list.append(row)
+    # Przygotowanie kolumn do końcowego DataFrame
+    final_columns = []
+    for col in comparison_cols:
+        final_columns.append(col + '_df1')
+        final_columns.append(col + '_df2')
+    
+    result_df = comparison_df[final_columns]
+    
+    # Zmiana nazw kolumn na format porównawczy
+    result_df.columns = pd.MultiIndex.from_tuples(
+        [(col.split('_')[0], 'df1') if '_df1' in col else (col.split('_')[0], 'df2') for col in result_df.columns],
+        names=['source', 'version']
+    )
+    
+    return result_df
 
-# Tabela z wyjściem na dole
-table = widgets.VBox(widgets_list, layout=widgets.Layout(width='50%', margin='auto'))
+# Przykładowe użycie funkcji
+df1 = pd.DataFrame({
+    'id': [1, 2, 3],
+    'name': ['Alice', 'Bob', 'Charlie'],
+    'kwota': [100, 200, 300],
+    'extra': ['A', 'B', 'C']
+})
 
-# Wyświetlenie całej tabeli oraz pola wyjścia
-display(table, output)
+df2 = pd.DataFrame({
+    'id': [1, 2, 4],
+    'name': ['Alice', 'Bob', 'Daniel'],
+    'kwota': [100, 250, 400],
+    'extra': ['A', 'X', 'D']
+})
+
+result = porownaj_dataframe(df1, df2, keys=['id', 'name'])
+print(result)
