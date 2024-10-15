@@ -255,3 +255,27 @@ if __name__ == '__main__':
     </script>
 </body>
 </html>
+
+
+import argparse
+import time
+from datetime import date
+    # Definicja argumentów
+parser = argparse.ArgumentParser(description="Script 1 - Example Script")
+parser.add_argument('--arg1', type=int, default=date.today(), help='Argument 1 for script1 (default: 10)')
+parser.add_argument('--arg2', type=str, default='default_value', help='Argument 2 for script1 (default: default_value)')
+
+def main():
+    args = parser.parse_args()
+
+    # Symulacja długiego procesu z outputem
+    print(f"Starting Script 1 with arg1 = {args.arg1} and arg2 = {args.arg2}")
+
+    for i in range(1, args.arg1 + 1):
+        print(f"Processing step {i}/{args.arg1}...")
+        time.sleep(1)  # Symulacja dłuższego procesu
+
+    print(f"Finished Script 1. arg2 value was: {args.arg2}")
+
+if __name__ == '__main__':
+    main()
