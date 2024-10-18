@@ -1,281 +1,95 @@
-from flask import Flask, render_template, request, Response
-import subprocess
-import traceback
-import threading
-import time
-import importlib
+from flask import Flask, render_template, request
+import sqlite3
 
 app = Flask(__name__)
 
-processes = {
-    'script1': 'script1',
-    'script2': 'script2'
-}
+# Funkcja łącząca się z bazą danych SQLite
+def get_db_connection():
+    conn = sqlite3.connect('twoja_baza.db')
+    conn.row_factory = sqlite3.Row  # Pozwala na zwracanie wyników jako słowniki
+    return conn
 
-running_processes = {}
-output_logs = {}
+# Pobranie nazw widoków (tabel) z bazy danych
+def get_views():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='view';")
+    views = [row['name'] for row in cursor.fetchall()]
+    conn.close()
+    return views
 
-# Funkcja do dynamicznego pobierania argumentów z parsera
-def get_script_args(module_name):
-    module = importlib.import_module(module_name)
-    parser = getattr(module, 'parser', None)
-
-    if parser is None:
-        return {}
-
-    args_info = {}
-    for action in parser._actions:
-        if action.dest != 'help':
-            arg_data = {
-                'type': action.type.__name__ if action.type else 'str',
-                'default': action.default,
-            }
-            args_info[action.dest] = arg_data
-    return args_info
-
-# Funkcja do uruchamiania procesu w tle
-def run_process_in_background(process_name, command):
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
-    running_processes[process_name] = process
-    output_logs[process_name] = []  # Resetowanie logów przed uruchomieniem
-    process_completed = False  # Flaga zakończenia procesu
-
-    # Dodanie komunikatu o uruchomieniu skryptu
-    output_logs[process_name].append(f"Uruchomienie kodu {command}...")
-
-    # Czytanie outputu procesu
-    while True:
-        output = process.stdout.readline()
-        if output:
-            output_logs[process_name].append(output.strip())
-
-        error = process.stderr.readline()
-        if error:
-            # Dodajemy błąd do logów
-            output_logs[process_name].append(f"<span style='color:red;'>{error.strip()}</span>")
-
-        if process.poll() is not None:
-            if not process_completed:
-                if process.returncode == 0:
-                    output_logs[process_name].append("<span style='color:green;'>Proces zakończony powodzeniem</span>")
-                else:
-                    # Przechwytywanie pełnego błędu z stderr
-                    error_output, _ = process.communicate()
-                    if error_output.strip():
-                        output_logs[process_name].append(f"<span style='color:red;'>Błąd: proces zakończony niepowodzeniem</span>")
-                        output_logs[process_name].append(f"<pre>{error_output.strip()}</pre>")
-                    else:
-                        output_logs[process_name].append("<span style='color:red;'>Błąd: proces zakończony niepowodzeniem, brak szczegółowych informacji.</span>")
-                process_completed = True
-
-            break
-
+# Pobranie danych z wybranego widoku
+def get_table_data(view_name):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute(f"SELECT * FROM {view_name};")
+    rows = cursor.fetchall()
+    headers = [description[0] for description in cursor.description]  # Nagłówki kolumn
+    conn.close()
+    return headers, rows
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    script_args = {}
-    process_name = None
+    views = get_views()  # Pobierz wszystkie widoki
+
+    selected_view = None
+    headers = []
+    rows = []
 
     if request.method == 'POST':
-        if 'process' in request.form:
-            process_name = request.form['process']
-            script_args = get_script_args(process_name)
+        selected_view = request.form.get('view')  # Pobierz wybrany widok z formularza
+        if selected_view:
+            headers, rows = get_table_data(selected_view)  # Pobierz dane z wybranego widoku
 
-        elif 'run_script' in request.form:
-            process_name = request.form['run_script']
-            script_args = get_script_args(process_name)
-
-            # Zbieramy argumenty z formularza
-            args = {}
-            for arg_name in script_args.keys():
-                args[arg_name] = request.form.get(arg_name)
-
-            # Budujemy komendę z dynamicznymi argumentami
-            command = f'python -m {process_name} ' + ' '.join([f'--{k} {v}' for k, v in args.items()])
-
-            output_logs[process_name] = []
-
-            # Uruchamiamy proces w tle
-            process_thread = threading.Thread(target=run_process_in_background, args=(process_name, command))
-            process_thread.start()
-
-    return render_template('index.html', processes=processes, script_args=script_args, process_name=process_name)
-
-@app.route('/output/<process_name>')
-def output(process_name):
-    def generate():
-        previous_output_length = 0
-        while True:
-            if process_name in output_logs:
-                current_log = output_logs[process_name]
-                if len(current_log) > previous_output_length:
-                    for line in current_log[previous_output_length:]:
-                        yield f"data:{line}\n\n"
-                    previous_output_length = len(current_log)
-
-                # Zakończ strumień, jeśli proces został zakończony
-                if current_log and "Proces zakończony" in current_log[-1]:
-                    yield "data:Proces zakończony\n\n"
-                    break  # Zakończ strumień
-
-            time.sleep(0.1)
-
-    return Response(generate(), mimetype='text/event-stream')
+    return render_template('index.html', views=views, selected_view=selected_view, headers=headers, rows=rows)
 
 if __name__ == '__main__':
     app.run(debug=True)
 
 
 
+
 <!DOCTYPE html>
-<html lang="en">
+<html lang="pl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Script Runner</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #f4f4f4;
-            color: #333;
-        }
-        h1, h2 {
-            color: #444;
-        }
-        #output {
-            border: 1px solid #000;
-            padding: 10px;
-            max-height: 400px;
-            overflow-y: auto;
-            background-color: black; /* Czarny kolor tła */
-            color: white; /* Biały kolor tekstu */
-        }
-        .error {
-            color: red;
-        }
-        .success {
-            color: green;
-        }
-    </style>
+    <title>SQLite Views</title>
 </head>
 <body>
-    <h1>Wybierz skrypt i uruchom</h1>
-
-    <!-- Dropdown do wyboru skryptu -->
+    <h1>Wybierz widok</h1>
+    
     <form method="POST">
-        <label for="process">Wybierz skrypt:</label>
-        <select name="process" id="process" onchange="this.form.submit()">
-            <option value="">-- Wybierz skrypt --</option>
-            {% for key, value in processes.items() %}
-                <option value="{{ key }}" {% if process_name == key %}selected{% endif %}>{{ key }}</option>
+        <label for="view">Widok:</label>
+        <select name="view" id="view">
+            {% for view in views %}
+                <option value="{{ view }}" {% if view == selected_view %} selected {% endif %}>{{ view }}</option>
             {% endfor %}
         </select>
+        <button type="submit">Pokaż</button>
     </form>
 
-    <!-- Formularz z argumentami skryptu -->
-    {% if script_args %}
-    <form method="POST">
-        <input type="hidden" name="run_script" value="{{ process_name }}">
-        <h2>Argumenty dla {{ process_name }}</h2>
-        {% for arg_name, arg_data in script_args.items() %}
-            <label for="{{ arg_name }}">{{ arg_name }}:</label>
-            <input type="text" name="{{ arg_name }}" value="{{ arg_data.default }}" id="{{ arg_name }}"><br>
-        {% endfor %}
-        <button type="submit">Uruchom skrypt</button>
-    </form>
-    {% else %}
-    <p>Wybierz skrypt, aby zobaczyć jego argumenty.</p>
+    {% if selected_view %}
+        <h2>Wybrany widok: {{ selected_view }}</h2>
+
+        <table border="1">
+            <thead>
+                <tr>
+                    {% for header in headers %}
+                        <th>{{ header }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                    <tr>
+                        {% for col in row %}
+                            <td>{{ col }}</td>
+                        {% endfor %}
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
     {% endif %}
-
-    <!-- Okienko do wyświetlania outputu w czasie rzeczywistym -->
-    <h2>Output:</h2>
-    <pre id="output"></pre>
-
-    <script>
-        let source = null;  // Zmienna do przechowywania instancji EventSource
-
-        // Funkcja do streamowania danych w czasie rzeczywistym
-        function startEventSource(processName) {
-            // Zamykanie poprzedniego połączenia, jeśli istnieje
-            if (source) {
-                source.close();
-            }
-
-            // Resetowanie outputu na nowe uruchomienie
-            const outputElement = document.getElementById("output");
-            outputElement.innerHTML = ""; // Czyszczenie poprzedniego wyjścia
-
-            // Tworzenie nowego EventSource
-            source = new EventSource("/output/" + processName);
-
-            source.onmessage = function(event) {
-                // Dodawanie nowych danych do outputu
-                outputElement.innerHTML += event.data + "\n";
-                outputElement.scrollTop = outputElement.scrollHeight; // Automatyczne przewijanie
-
-                // Sprawdzanie, czy wiadomość końcowa jest odebrana
-                if (event.data.includes("Proces zakończony")) {
-                    source.close(); // Zamknięcie połączenia
-                }
-            };
-
-            source.onerror = function(event) {
-                console.error("EventSource error:", event);
-                source.close();  // Zamknięcie połączenia w przypadku błędu
-            };
-        }
-
-        // Funkcja do uruchomienia skryptu
-        function runScript() {
-            const processName = document.querySelector('input[name="run_script"]').value;
-            if (processName) {
-                startEventSource(processName);  // Rozpoczęcie streamowania danych
-            }
-        }
-
-        // Wywołanie runScript() po załadowaniu strony, jeśli wybrano skrypt
-        window.onload = function() {
-            const processName = document.querySelector('input[name="run_script"]');
-            if (processName) {
-                runScript();  // Uruchomienie skryptu, jeśli jest wybrany
-            }
-        };
-
-        function filterDropdown() {
-            const input = document.getElementById('process').value.toLowerCase();
-            const options = document.querySelectorAll('option');
-            options.forEach(option => {
-                if (option.value.toLowerCase().includes(input)) {
-                    option.style.display = '';  // Pokaż, jeśli pasuje
-                } else {
-                    option.style.display = 'none';  // Ukryj, jeśli nie pasuje
-                }
-            });
-        }
-    </script>
 </body>
 </html>
-
-
-import argparse
-import time
-from datetime import date
-    # Definicja argumentów
-parser = argparse.ArgumentParser(description="Script 1 - Example Script")
-parser.add_argument('--arg1', type=int, default=date.today(), help='Argument 1 for script1 (default: 10)')
-parser.add_argument('--arg2', type=str, default='default_value', help='Argument 2 for script1 (default: default_value)')
-
-def main():
-    args = parser.parse_args()
-
-    # Symulacja długiego procesu z outputem
-    print(f"Starting Script 1 with arg1 = {args.arg1} and arg2 = {args.arg2}")
-
-    for i in range(1, args.arg1 + 1):
-        print(f"Processing step {i}/{args.arg1}...")
-        time.sleep(1)  # Symulacja dłuższego procesu
-
-    print(f"Finished Script 1. arg2 value was: {args.arg2}")
-
-if __name__ == '__main__':
-    main()
