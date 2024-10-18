@@ -47,14 +47,23 @@ if __name__ == '__main__':
     app.run(debug=True)
 
 
-
-
 <!DOCTYPE html>
 <html lang="pl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SQLite Views</title>
+    <style>
+        table {
+            width: 100%;
+            border-collapse: collapse;  /* Usuwa podwójne linie między komórkami */
+        }
+        th, td {
+            border: 1px solid black;  /* Dodaje obramowanie do każdej komórki */
+            text-align: center;  /* Wyśrodkowuje zawartość */
+            padding: 8px;  /* Dodaje trochę miejsca wewnątrz komórek */
+        }
+    </style>
     <script>
         // Funkcja wysyłająca formularz automatycznie po zmianie opcji w dropdownie
         function submitForm() {
@@ -78,11 +87,11 @@ if __name__ == '__main__':
     {% if selected_view %}
         <h2>Wybrany widok: {{ selected_view }}</h2>
 
-        <table border="1">
+        <table>
             <thead>
                 <tr>
                     {% for header in headers %}
-                        <th>{{ header }}</th>
+                        <th>{{ header }}</th>  <!-- Nagłówki tabeli -->
                     {% endfor %}
                 </tr>
             </thead>
@@ -90,7 +99,7 @@ if __name__ == '__main__':
                 {% for row in rows %}
                     <tr>
                         {% for col in row %}
-                            <td>{{ col }}</td>
+                            <td>{{ col }}</td>  <!-- Wiersze tabeli -->
                         {% endfor %}
                     </tr>
                 {% endfor %}
@@ -99,4 +108,3 @@ if __name__ == '__main__':
     {% endif %}
 </body>
 </html>
-
