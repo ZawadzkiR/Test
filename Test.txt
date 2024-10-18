@@ -55,18 +55,24 @@ if __name__ == '__main__':
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SQLite Views</title>
+    <script>
+        // Funkcja wysyłająca formularz automatycznie po zmianie opcji w dropdownie
+        function submitForm() {
+            document.getElementById('viewForm').submit();
+        }
+    </script>
 </head>
 <body>
     <h1>Wybierz widok</h1>
     
-    <form method="POST">
+    <!-- Formularz -->
+    <form method="POST" id="viewForm">
         <label for="view">Widok:</label>
-        <select name="view" id="view">
+        <select name="view" id="view" onchange="submitForm()">  <!-- onchange wywołuje submitForm() -->
             {% for view in views %}
                 <option value="{{ view }}" {% if view == selected_view %} selected {% endif %}>{{ view }}</option>
             {% endfor %}
         </select>
-        <button type="submit">Pokaż</button>
     </form>
 
     {% if selected_view %}
@@ -93,3 +99,4 @@ if __name__ == '__main__':
     {% endif %}
 </body>
 </html>
+
