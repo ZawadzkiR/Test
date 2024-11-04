@@ -1,39 +1,103 @@
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Formularz z Tooltipem</title>
-    <!-- Bootstrap CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
-    <!-- Bootstrap Icons -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
-</head>
-<body>
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+from crontab import CronTab
+import subprocess
 
-<div class="container mt-5">
-    <form>
-        <div class="mb-3">
-            <label for="param1" class="form-label">Parametr 1</label>
-            <input type="text" class="form-control" id="param1" aria-describedby="param1Help">
-            <span data-bs-toggle="tooltip" title="{{ tooltip_text }}">
-                <i class="bi bi-info-circle"></i>
-            </span>
-        </div>
-    </form>
-</div>
+# Tworzenie obiektu crontaba dla użytkownika
+cron = CronTab(user=True)
 
-<!-- Bootstrap JS (wymagane dla działania tooltipów) -->
-<script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.11.6/dist/umd/popper.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.min.js"></script>
+# Widgety
+command_input = widgets.Text(description="Komenda:")
+comment_input = widgets.Text(description="Komentarz:")
+time_input = widgets.Text(description="Czas (crontab format):")
+env_input = widgets.Text(value="python3", description="Środowisko Python:")
+log_checkbox = widgets.Checkbox(value=False, description="Dodaj logi (2>&1)")
+add_button = widgets.Button(description="Dodaj Zadanie")
+update_button = widgets.Button(description="Zaktualizuj Zadanie")
+delete_button = widgets.Button(description="Usuń Zadanie")
+run_button = widgets.Button(description="Uruchom ręcznie")
+output_area = widgets.Output()
 
-<script>
-    // Inicjalizacja tooltipów Bootstrap
-    var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
-    var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
-        return new bootstrap.Tooltip(tooltipTriggerEl);
-    });
-</script>
+# Lista zadań crontaba
+job_selector = widgets.Dropdown(description="Wybierz zadanie:", options=["Brak zadań"])
+load_jobs_button = widgets.Button(description="Odśwież zadania")
 
-</body>
-</html>
+# Funkcja do odświeżania listy zadań
+def load_jobs():
+    jobs = [(f"{job.comment}: {job.command}", job) for job in cron]
+    job_selector.options = jobs if jobs else ["Brak zadań"]
+
+# Funkcja dodawania zadania
+def add_job(button):
+    command = command_input.value
+    comment = comment_input.value
+    time_str = time_input.value
+    env = env_input.value
+    command_full = f"{env} {command}"
+    
+    if log_checkbox.value:
+        command_full += " 2>&1"
+    
+    job = cron.new(command=command_full, comment=comment)
+    job.setall(time_str)
+    cron.write()
+    load_jobs()
+    with output_area:
+        clear_output()
+        print("Dodano zadanie.")
+
+# Funkcja aktualizacji wybranego zadania
+def update_job(button):
+    job = job_selector.value
+    if job != "Brak zadań":
+        job.command = f"{env_input.value} {command_input.value}"
+        if log_checkbox.value:
+            job.command += " 2>&1"
+        job.comment = comment_input.value
+        job.setall(time_input.value)
+        cron.write()
+        load_jobs()
+        with output_area:
+            clear_output()
+            print("Zaktualizowano zadanie.")
+
+# Funkcja usuwania wybranego zadania
+def delete_job(button):
+    job = job_selector.value
+    if job != "Brak zadań":
+        cron.remove(job)
+        cron.write()
+        load_jobs()
+        with output_area:
+            clear_output()
+            print("Usunięto zadanie.")
+
+# Funkcja ręcznego uruchomienia wybranego zadania
+def run_job(button):
+    job = job_selector.value
+    if job != "Brak zadań":
+        try:
+            subprocess.run(job.command, shell=True, check=True)
+            with output_area:
+                clear_output()
+                print("Pomyślnie uruchomiono zadanie.")
+        except subprocess.CalledProcessError as e:
+            with output_area:
+                clear_output()
+                print("Błąd podczas uruchamiania zadania:", e)
+
+# Ładowanie zadań przy starcie
+load_jobs()
+
+# Przypisanie funkcji do przycisków
+add_button.on_click(add_job)
+update_button.on_click(update_job)
+delete_button.on_click(delete_job)
+run_button.on_click(run_job)
+load_jobs_button.on_click(lambda x: load_jobs())
+
+# Wyświetlenie widgetów
+display(command_input, comment_input, time_input, env_input, log_checkbox,
+        add_button, update_button, delete_button, run_button,
+        job_selector, load_jobs_button, output_area)
+
