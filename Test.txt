@@ -1,103 +1,128 @@
-import ipywidgets as widgets
-from IPython.display import display, clear_output
-from crontab import CronTab
+from flask import Flask, render_template, request, jsonify
+import sqlite3
 import subprocess
+import traceback
+import threading
 
-# Tworzenie obiektu crontaba dla użytkownika
-cron = CronTab(user=True)
+app = Flask(__name__)
+running_process = None  # Flaga wskazująca, czy jakiś proces jest uruchomiony
 
-# Widgety
-command_input = widgets.Text(description="Komenda:")
-comment_input = widgets.Text(description="Komentarz:")
-time_input = widgets.Text(description="Czas (crontab format):")
-env_input = widgets.Text(value="python3", description="Środowisko Python:")
-log_checkbox = widgets.Checkbox(value=False, description="Dodaj logi (2>&1)")
-add_button = widgets.Button(description="Dodaj Zadanie")
-update_button = widgets.Button(description="Zaktualizuj Zadanie")
-delete_button = widgets.Button(description="Usuń Zadanie")
-run_button = widgets.Button(description="Uruchom ręcznie")
-output_area = widgets.Output()
+# Połączenie z bazą danych SQLite
+def get_db_connection():
+    conn = sqlite3.connect('processes.db')
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# Lista zadań crontaba
-job_selector = widgets.Dropdown(description="Wybierz zadanie:", options=["Brak zadań"])
-load_jobs_button = widgets.Button(description="Odśwież zadania")
+# Strona główna: wyświetlanie procesów z przyciskami "Uruchom"
+@app.route('/')
+def index():
+    conn = get_db_connection()
+    processes = conn.execute('SELECT id, name, path FROM processes').fetchall()
+    conn.close()
+    return render_template('index.html', processes=processes)
 
-# Funkcja do odświeżania listy zadań
-def load_jobs():
-    jobs = [(f"{job.comment}: {job.command}", job) for job in cron]
-    job_selector.options = jobs if jobs else ["Brak zadań"]
+# Uruchamianie procesu i zwracanie statusu
+@app.route('/run_process/<int:process_id>', methods=['POST'])
+def run_process(process_id):
+    global running_process
+    if running_process:
+        return jsonify({'status': 'error', 'message': 'Inny proces jest już uruchomiony.'})
 
-# Funkcja dodawania zadania
-def add_job(button):
-    command = command_input.value
-    comment = comment_input.value
-    time_str = time_input.value
-    env = env_input.value
-    command_full = f"{env} {command}"
-    
-    if log_checkbox.value:
-        command_full += " 2>&1"
-    
-    job = cron.new(command=command_full, comment=comment)
-    job.setall(time_str)
-    cron.write()
-    load_jobs()
-    with output_area:
-        clear_output()
-        print("Dodano zadanie.")
+    conn = get_db_connection()
+    process = conn.execute('SELECT * FROM processes WHERE id = ?', (process_id,)).fetchone()
+    conn.close()
 
-# Funkcja aktualizacji wybranego zadania
-def update_job(button):
-    job = job_selector.value
-    if job != "Brak zadań":
-        job.command = f"{env_input.value} {command_input.value}"
-        if log_checkbox.value:
-            job.command += " 2>&1"
-        job.comment = comment_input.value
-        job.setall(time_input.value)
-        cron.write()
-        load_jobs()
-        with output_area:
-            clear_output()
-            print("Zaktualizowano zadanie.")
+    if process is None:
+        return jsonify({'status': 'error', 'message': 'Proces nie istnieje.'})
 
-# Funkcja usuwania wybranego zadania
-def delete_job(button):
-    job = job_selector.value
-    if job != "Brak zadań":
-        cron.remove(job)
-        cron.write()
-        load_jobs()
-        with output_area:
-            clear_output()
-            print("Usunięto zadanie.")
+    running_process = True  # Ustawienie flagi na True, by zablokować inne przyciski
+    output_log = []
 
-# Funkcja ręcznego uruchomienia wybranego zadania
-def run_job(button):
-    job = job_selector.value
-    if job != "Brak zadań":
+    def execute_process():
+        global running_process
         try:
-            subprocess.run(job.command, shell=True, check=True)
-            with output_area:
-                clear_output()
-                print("Pomyślnie uruchomiono zadanie.")
+            # Uruchamianie procesu i zapisywanie logów do listy `output_log`
+            result = subprocess.run([process['path']], check=True, capture_output=True, text=True)
+            output_log.append(result.stdout)
+            status = 'success'
         except subprocess.CalledProcessError as e:
-            with output_area:
-                clear_output()
-                print("Błąd podczas uruchamiania zadania:", e)
+            output_log.append("Błąd:\n" + traceback.format_exc() + "\n" + e.stderr)
+            status = 'error'
+        finally:
+            running_process = False  # Proces zakończony, odblokowanie przycisków
 
-# Ładowanie zadań przy starcie
-load_jobs()
+    # Tworzenie nowego wątku, aby proces działał asynchronicznie
+    thread = threading.Thread(target=execute_process)
+    thread.start()
+    thread.join()  # Czekanie na zakończenie wątku
 
-# Przypisanie funkcji do przycisków
-add_button.on_click(add_job)
-update_button.on_click(update_job)
-delete_button.on_click(delete_job)
-run_button.on_click(run_job)
-load_jobs_button.on_click(lambda x: load_jobs())
+    return jsonify({'status': status, 'log': ''.join(output_log)})
 
-# Wyświetlenie widgetów
-display(command_input, comment_input, time_input, env_input, log_checkbox,
-        add_button, update_button, delete_button, run_button,
-        job_selector, load_jobs_button, output_area)
+if __name__ == '__main__':
+    app.run(debug=True)
 
+
+
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>Lista Procesów</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+</head>
+<body>
+    <h1>Lista Procesów</h1>
+    <table border="1">
+        <thead>
+            <tr>
+                <th>Nazwa procesu</th>
+                <th>Ścieżka</th>
+                <th>Akcja</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for process in processes %}
+            <tr>
+                <td>{{ process['name'] }}</td>
+                <td>{{ process['path'] }}</td>
+                <td><button onclick="runProcess({{ process['id'] }}, this)">Uruchom</button></td>
+                <td id="status-{{ process['id'] }}"></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div id="log-output" style="display: none;">
+        <h2>Logi procesu:</h2>
+        <pre id="log-content"></pre>
+    </div>
+
+    <script>
+        function runProcess(processId, button) {
+            // Blokowanie wszystkich przycisków "Uruchom"
+            $("button").attr("disabled", true);
+
+            $.post(`/run_process/${processId}`)
+                .done(function(response) {
+                    if (response.status === 'success') {
+                        $('#status-' + processId).html('✅');
+                    } else {
+                        $('#status-' + processId).html('❌');
+                    }
+
+                    // Wyświetlenie logów
+                    $('#log-content').text(response.log);
+                    $('#log-output').show();
+                })
+                .fail(function() {
+                    alert("Wystąpił błąd podczas uruchamiania procesu.");
+                })
+                .always(function() {
+                    // Odblokowanie przycisków po zakończeniu procesu
+                    $("button").attr("disabled", false);
+                });
+        }
+    </script>
+</body>
+</html>
