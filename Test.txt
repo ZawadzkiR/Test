@@ -1,98 +1,75 @@
 import os
-import pandas as pd
-from atlassian import Confluence
+import re
+from bs4 import BeautifulSoup
 
-# Funkcja do rekurencyjnego wyszukiwania plików README i tworzenia markdown
+def create_html_with_toc_and_content(root_dir, output_file):
+    toc = []
+    html_content = ["<html><head><title>Zebrane README</title></head><body>"]
 
-def create_markdown_from_readme(directory, output_file, table_output_file):
-    table_of_contents = ["# Spis treści"]
-    content = []
-    access_data = []
+    for current_dir, _, files in os.walk(root_dir):
+        relative_dir = os.path.relpath(current_dir, root_dir)
+        readme_path = os.path.join(current_dir, "readme.md")
 
-    for root, _, files in os.walk(directory):
-        readme_files = [f for f in files if f.lower().startswith("readme")]
-        
-        if readme_files:
-            relative_path = os.path.relpath(root, directory)
-            depth = relative_path.count(os.sep)
-            header_id = relative_path.replace(os.sep, "-").replace(" ", "-").lower()
-            header = f"{'#' * (depth + 1)} {relative_path}"
-            link = f"[{relative_path}](#{header_id})"
-            table_of_contents.append(f"{'  ' * depth}- {link}")
+        if "readme.md" in files:
+            toc.append(relative_dir)
+            html_content.append(f"<h2 id='{relative_dir}'>{relative_dir}</h2>")
+            
+            with open(readme_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                html_content.append(markdown_to_html(content))
 
-            content.append(f"<a id='{header_id}'></a>")  # Anchor for navigation
-            content.append(header)
+    # Dodajemy spis treści na początku
+    html_content.insert(1, "<h1>Spis treści</h1><ul>")
+    for dir_name in toc:
+        html_content.insert(2, f"<li><a href='#{dir_name}'>{dir_name}</a></li>")
+    html_content.insert(3, "</ul>")
 
-            for readme in readme_files:
-                with open(os.path.join(root, readme), 'r', encoding='utf-8') as f:
-                    content.append(f"\n*Plik: {readme}*\n")
-                    readme_content = f.read()
-                    content.append(readme_content)
+    html_content.append("</body></html>")
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write("\n".join(html_content))
 
-                    # Wyszukiwanie tabeli "Dostępny"
-                    if "| Nazwa | Źródło | Level |" in readme_content:
-                        table_start = readme_content.index("| Nazwa | Źródło | Level |")
-                        table_lines = readme_content[table_start:].splitlines()
+def collect_tables_from_readme(root_dir, output_file):
+    all_tables = []
 
-                        # Dodanie wierszy do tabeli
-                        for line in table_lines[1:]:
-                            if line.strip() == "" or not line.startswith("|"):
-                                break
-                            columns = [col.strip() for col in line.strip('|').split('|')]
-                            if len(columns) == 3:
-                                access_data.append(columns)
+    for current_dir, _, files in os.walk(root_dir):
+        readme_path = os.path.join(current_dir, "readme.md")
 
-    # Zapis do pliku markdown
-    with open(output_file, 'w', encoding='utf-8') as md:
-        md.write("\n".join(table_of_contents))
-        md.write("\n\n")
-        md.write("\n\n".join(content))
+        if "readme.md" in files:
+            with open(readme_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                tables = extract_tables(content)
+                all_tables.extend(tables)
 
-    # Tworzenie tabeli dostępu i zapis do pliku
-    if access_data:
-        df = pd.DataFrame(access_data, columns=["Nazwa", "Źródło", "Level"])
-        df.sort_values(by="Źródło", inplace=True)
-        with open(table_output_file, 'w', encoding='utf-8') as tf:
-            tf.write(df.to_markdown(index=False))
+    # Zapisanie tabel w formacie Markdown
+    if all_tables:
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write("# Zebrane tabele\n\n")
+            for table in all_tables:
+                f.write(table)
+                f.write("\n\n")
 
-# Funkcja do przesłania markdown na Atlassian Wiki
-def upload_to_atlassian_wiki(confluence_url, username, api_token, space_key, parent_page_id, page_title, markdown_file):
-    # Inicjalizacja Confluence API
-    confluence = Confluence(
-        url=confluence_url,
-        username=username,
-        password=api_token
-    )
+def extract_tables(content):
+    """Wyszukuje tabele w pliku Markdown."""
+    table_pattern = re.compile(r"(\|.*?\|\n)(\|[-:| ]+\|\n)((\|.*?\|\n)+)", re.DOTALL)
+    matches = table_pattern.findall(content)
+    return [match[0] + match[1] + match[2] for match in matches]
 
-    # Odczyt markdown
-    with open(markdown_file, 'r', encoding='utf-8') as f:
-        markdown_content = f.read()
-
-    # Utworzenie strony
-    confluence.create_page(
-        space=space_key,
-        parent_id=parent_page_id,
-        title=page_title,
-        body=markdown_content,
-        representation='wiki'
-    )
+def markdown_to_html(markdown_content):
+    """Konwertuje Markdown na HTML."""
+    try:
+        from markdown2 import markdown
+        return markdown(markdown_content)
+    except ImportError:
+        soup = BeautifulSoup(markdown_content, "html.parser")
+        return str(soup)
 
 if __name__ == "__main__":
-    # Ścieżka do katalogu z plikami README
-    source_directory = "sciezka/do/katalogu"
-    output_markdown = "output.md"
-    table_output_markdown = "access_table.md"
+    root_directory = "KATALOG"
+    html_output = "zebrane_readme.html"
+    table_output = "zebrane_tabele.md"
 
-    # Tworzenie markdown z plików README
-    create_markdown_from_readme(source_directory, output_markdown, table_output_markdown)
+    create_html_with_toc_and_content(root_directory, html_output)
+    collect_tables_from_readme(root_directory, table_output)
 
-    # Konfiguracja Confluence
-    confluence_url = "https://twoja_domena.atlassian.net/wiki"
-    username = "twoj_email"
-    api_token = "twoj_api_token"
-    space_key = "KEY"
-    parent_page_id = "123456"
-    page_title = "Zebrane README"
-
-    # Przesyłanie na Atlassian Wiki
-    upload_to_atlassian_wiki(confluence_url, username, api_token, space_key, parent_page_id, page_title, output_markdown)
+    print(f"Plik HTML zapisany jako: {html_output}")
+    print(f"Plik z tabelami zapisany jako: {table_output}")
