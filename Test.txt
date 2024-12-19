@@ -1,11 +1,12 @@
 import os
 import glob
 import pandas as pd
-from io import StringIO  # Zmieniamy import na standardowy sposób
+from io import StringIO
 
 def extract_table_from_readme(file_path):
     """
     Funkcja do wyciągania tabeli 'dostepy' z pliku README.md w formacie Markdown
+    tylko jeśli zawiera odpowiednie kolumny: 'Nazwa', 'źródło', 'level'
     """
     with open(file_path, 'r', encoding='utf-8') as file:
         content = file.read()
@@ -14,6 +15,7 @@ def extract_table_from_readme(file_path):
     lines = content.split('\n')
     table_start = False
     table_lines = []
+    tables = []
     
     for line in lines:
         if line.startswith('|'):
@@ -21,17 +23,22 @@ def extract_table_from_readme(file_path):
             table_lines.append(line)
             table_start = True
         elif table_start and line.strip() == '':
-            # Koniec tabeli, przerwij
-            break
+            # Koniec tabeli, zapisujemy tabelę
+            tables.append(table_lines)
+            table_lines = []  # Resetujemy listę dla kolejnej tabeli
+            table_start = False
 
-    if table_lines:
-        # Połącz tabelę z listy w jeden ciąg znaków
-        table_markdown = '\n'.join(table_lines)
-        # Używamy pandas do wczytania tabeli w formacie markdown
+    # Przechodzimy przez wszystkie znalezione tabele i weryfikujemy, która ma odpowiednie kolumny
+    for table in tables:
+        table_markdown = '\n'.join(table)
         df = pd.read_csv(StringIO(table_markdown), sep="|", engine='python').iloc[:, 1:-1]
         df.columns = [col.strip() for col in df.columns]
-        return df
-    return None
+
+        # Sprawdzamy, czy tabela ma odpowiednie kolumny
+        if set(["Nazwa", "źródło", "level"]).issubset(df.columns):
+            return df  # Zwracamy tę tabelę
+
+    return None  # Jeśli nie znaleziono odpowiedniej tabeli
 
 def create_combined_table(directory, output_file):
     """
