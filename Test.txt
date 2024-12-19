@@ -1,128 +1,93 @@
-from flask import Flask, render_template, request, jsonify
-import sqlite3
-import subprocess
-import traceback
-import threading
+import os
+import pandas as pd
+from atlassian import Confluence
 
-app = Flask(__name__)
-running_process = None  # Flaga wskazująca, czy jakiś proces jest uruchomiony
+# Funkcja do rekurencyjnego wyszukiwania plików README i tworzenia markdown
 
-# Połączenie z bazą danych SQLite
-def get_db_connection():
-    conn = sqlite3.connect('processes.db')
-    conn.row_factory = sqlite3.Row
-    return conn
+def create_markdown_from_readme(directory, output_file, table_output_file):
+    table_of_contents = []
+    content = []
+    access_data = []
 
-# Strona główna: wyświetlanie procesów z przyciskami "Uruchom"
-@app.route('/')
-def index():
-    conn = get_db_connection()
-    processes = conn.execute('SELECT id, name, path FROM processes').fetchall()
-    conn.close()
-    return render_template('index.html', processes=processes)
+    for root, _, files in os.walk(directory):
+        readme_files = [f for f in files if f.lower().startswith("readme")]
+        
+        if readme_files:
+            relative_path = os.path.relpath(root, directory)
+            depth = relative_path.count(os.sep)
+            header = f"{'#' * (depth + 1)} {relative_path}"
+            table_of_contents.append(header)
 
-# Uruchamianie procesu i zwracanie statusu
-@app.route('/run_process/<int:process_id>', methods=['POST'])
-def run_process(process_id):
-    global running_process
-    if running_process:
-        return jsonify({'status': 'error', 'message': 'Inny proces jest już uruchomiony.'})
+            for readme in readme_files:
+                with open(os.path.join(root, readme), 'r', encoding='utf-8') as f:
+                    content.append(header)
+                    content.append(f"\n*Plik: {readme}*\n")
+                    readme_content = f.read()
+                    content.append(readme_content)
 
-    conn = get_db_connection()
-    process = conn.execute('SELECT * FROM processes WHERE id = ?', (process_id,)).fetchone()
-    conn.close()
+                    # Wyszukiwanie tabeli "Dostępny"
+                    if "| Nazwa | Źródło | Level |" in readme_content:
+                        table_start = readme_content.index("| Nazwa | Źródło | Level |")
+                        table_lines = readme_content[table_start:].splitlines()
 
-    if process is None:
-        return jsonify({'status': 'error', 'message': 'Proces nie istnieje.'})
+                        # Dodanie wierszy do tabeli
+                        for line in table_lines[1:]:
+                            if line.strip() == "" or not line.startswith("|"):
+                                break
+                            columns = [col.strip() for col in line.strip('|').split('|')]
+                            if len(columns) == 3:
+                                access_data.append(columns)
 
-    running_process = True  # Ustawienie flagi na True, by zablokować inne przyciski
-    output_log = []
+    # Zapis do pliku markdown
+    with open(output_file, 'w', encoding='utf-8') as md:
+        md.write("\n".join(table_of_contents))
+        md.write("\n\n")
+        md.write("\n\n".join(content))
 
-    def execute_process():
-        global running_process
-        try:
-            # Uruchamianie procesu i zapisywanie logów do listy `output_log`
-            result = subprocess.run([process['path']], check=True, capture_output=True, text=True)
-            output_log.append(result.stdout)
-            status = 'success'
-        except subprocess.CalledProcessError as e:
-            output_log.append("Błąd:\n" + traceback.format_exc() + "\n" + e.stderr)
-            status = 'error'
-        finally:
-            running_process = False  # Proces zakończony, odblokowanie przycisków
+    # Tworzenie tabeli dostępu i zapis do pliku
+    if access_data:
+        df = pd.DataFrame(access_data, columns=["Nazwa", "Źródło", "Level"])
+        df.sort_values(by="Źródło", inplace=True)
+        df.to_markdown(table_output_file, index=False)
 
-    # Tworzenie nowego wątku, aby proces działał asynchronicznie
-    thread = threading.Thread(target=execute_process)
-    thread.start()
-    thread.join()  # Czekanie na zakończenie wątku
+# Funkcja do przesłania markdown na Atlassian Wiki
+def upload_to_atlassian_wiki(confluence_url, username, api_token, space_key, parent_page_id, page_title, markdown_file):
+    # Inicjalizacja Confluence API
+    confluence = Confluence(
+        url=confluence_url,
+        username=username,
+        password=api_token
+    )
 
-    return jsonify({'status': status, 'log': ''.join(output_log)})
+    # Odczyt markdown
+    with open(markdown_file, 'r', encoding='utf-8') as f:
+        markdown_content = f.read()
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    # Utworzenie strony
+    confluence.create_page(
+        space=space_key,
+        parent_id=parent_page_id,
+        title=page_title,
+        body=markdown_content,
+        representation='wiki'
+    )
 
+if __name__ == "__main__":
+    # Ścieżka do katalogu z plikami README
+    source_directory = "sciezka/do/katalogu"
+    output_markdown = "output.md"
+    table_output_markdown = "access_table.md"
 
+    # Tworzenie markdown z plików README
+    create_markdown_from_readme(source_directory, output_markdown, table_output_markdown)
 
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <title>Lista Procesów</title>
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-</head>
-<body>
-    <h1>Lista Procesów</h1>
-    <table border="1">
-        <thead>
-            <tr>
-                <th>Nazwa procesu</th>
-                <th>Ścieżka</th>
-                <th>Akcja</th>
-                <th>Status</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for process in processes %}
-            <tr>
-                <td>{{ process['name'] }}</td>
-                <td>{{ process['path'] }}</td>
-                <td><button onclick="runProcess({{ process['id'] }}, this)">Uruchom</button></td>
-                <td id="status-{{ process['id'] }}"></td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
+    # Konfiguracja Confluence
+    confluence_url = "https://twoja_domena.atlassian.net/wiki"
+    username = "twoj_email"
+    api_token = "twoj_api_token"
+    space_key = "KEY"
+    parent_page_id = "123456"
+    page_title = "Zebrane README"
 
-    <div id="log-output" style="display: none;">
-        <h2>Logi procesu:</h2>
-        <pre id="log-content"></pre>
-    </div>
-
-    <script>
-        function runProcess(processId, button) {
-            // Blokowanie wszystkich przycisków "Uruchom"
-            $("button").attr("disabled", true);
-
-            $.post(`/run_process/${processId}`)
-                .done(function(response) {
-                    if (response.status === 'success') {
-                        $('#status-' + processId).html('✅');
-                    } else {
-                        $('#status-' + processId).html('❌');
-                    }
-
-                    // Wyświetlenie logów
-                    $('#log-content').text(response.log);
-                    $('#log-output').show();
-                })
-                .fail(function() {
-                    alert("Wystąpił błąd podczas uruchamiania procesu.");
-                })
-                .always(function() {
-                    // Odblokowanie przycisków po zakończeniu procesu
-                    $("button").attr("disabled", false);
-                });
-        }
-    </script>
-</body>
-</html>
+    # Przesyłanie na Atlassian Wiki
+    upload_to_atlassian_wiki(confluence_url, username, api_token, space_key, parent_page_id, page_title, output_markdown)
