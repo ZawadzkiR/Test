@@ -13,7 +13,7 @@ def collect_readme_files(directory):
         for file in files:
             if file.lower() == "readme.md":
                 readme_files.append(os.path.join(root, file))
-    return sorted(readme_files, key=lambda x: x.lower())  # Sortuj alfabetycznie
+    return readme_files  # Nie sortuj, zachowaj hierarchię katalogów
 
 def extract_tables_from_markdown(markdown_content):
     """Wyszukuje tabele w treści Markdown i zwraca ich zawartość."""
@@ -65,6 +65,9 @@ def generate_html_with_toc(readme_files):
             padding: 10px;
             border-radius: 5px;
         }
+        .toc ul {
+            padding-left: 20px;
+        }
     </style>
     """
     html_content = f"<html><head><title>README Files</title>{css}</head><body>"
@@ -72,10 +75,7 @@ def generate_html_with_toc(readme_files):
 
     # Spis treści
     toc = "<div class='toc'><h2>Spis treści</h2><ul>"
-    for readme_file in readme_files:
-        relative_path = os.path.relpath(readme_file)
-        folder_name = os.path.basename(os.path.dirname(relative_path))  # Tylko nazwa folderu
-        toc += f'<li><a href="#{folder_name}">{folder_name}</a></li>'
+    toc = generate_toc(readme_files, toc)
     toc += "</ul></div>"
     html_content += toc
 
@@ -90,6 +90,22 @@ def generate_html_with_toc(readme_files):
 
     html_content += "</body></html>"
     return html_content
+
+def generate_toc(readme_files, toc, depth=0):
+    """Generuje spis treści w hierarchii katalogów z odpowiednimi wcięciami."""
+    files_by_folder = {}
+    for readme_file in readme_files:
+        folder = os.path.dirname(readme_file)
+        folder_name = os.path.basename(folder)
+        if folder_name not in files_by_folder:
+            files_by_folder[folder_name] = []
+        files_by_folder[folder_name].append(readme_file)
+
+    for folder_name, files in files_by_folder.items():
+        indent = "  " * depth  # Wcięcie zależne od głębokości
+        toc += f'<li>{indent}<a href="#{folder_name}">{folder_name}</a></li>'
+        toc = generate_toc(files, toc, depth + 1)  # Rekursywnie przetwarzaj podkatalogi
+    return toc
 
 def generate_combined_table(tables):
     """Generuje jedną główną tabelę z wszystkich tabel w plikach Markdown."""
