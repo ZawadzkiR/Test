@@ -13,6 +13,10 @@ def create_combined_readme(directory, output_file):
         # Zmienna do przechowywania już dodanych katalogów
         added_dirs = set()
 
+        # Funkcja do generowania wcięcia na podstawie głębokości katalogu
+        def generate_indent(level):
+            return '    ' * level  # Cztery spacje na każde wcięcie
+
         # Iteracja po wszystkich plikach README.md
         for readme in readme_files:
             # Uzyskaj katalog z pliku README.md
@@ -21,10 +25,17 @@ def create_combined_readme(directory, output_file):
             # Stwórz unikalny identyfikator nagłówka dla katalogu (zastąp spacje i inne znaki specjalne)
             safe_directory_name = re.sub(r'[^a-zA-Z0-9]', '-', directory_name.lower())
             
+            # Podziel ścieżkę na katalogi
+            path_parts = directory_name.split(os.sep)
+            
+            # Nazwa ostatniego katalogu
+            last_dir = path_parts[-1]
+            
             # Jeśli nie dodano jeszcze tego katalogu do spisu treści, dodaj go
             if directory_name not in added_dirs:
-                # Dodaj link do spisu treści
-                outfile.write(f"- [{directory_name}](#{safe_directory_name})\n")
+                # Dodaj link do spisu treści z odpowiednim wcięciem
+                indent_level = len(path_parts) - 1  # Poziom wcięcia zależy od głębokości katalogu
+                outfile.write(f"{generate_indent(indent_level)}- [{last_dir}](#{safe_directory_name})\n")
                 added_dirs.add(directory_name)
         
         # Dodaj separator
@@ -37,8 +48,14 @@ def create_combined_readme(directory, output_file):
             # Stwórz unikalny identyfikator nagłówka dla katalogu
             safe_directory_name = re.sub(r'[^a-zA-Z0-9]', '-', directory_name.lower())
             
+            # Podziel ścieżkę na katalogi
+            path_parts = directory_name.split(os.sep)
+            
+            # Nazwa ostatniego katalogu
+            last_dir = path_parts[-1]
+            
             # Dodaj nagłówek dla katalogu z odpowiednim identyfikatorem
-            outfile.write(f"## {directory_name}  <a name='{safe_directory_name}'></a>\n\n")
+            outfile.write(f"## {last_dir}  <a name='{safe_directory_name}'></a>\n\n")
             
             # Odczytaj zawartość pliku README.md
             with open(readme, 'r', encoding='utf-8') as infile:
