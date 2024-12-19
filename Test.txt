@@ -1,137 +1,54 @@
+import glob
 import os
-import markdown
 import re
 
-def markdown_to_html(markdown_content):
-    """Konwertuje Markdown na HTML."""
-    return markdown.markdown(markdown_content)
+def create_combined_readme(directory, output_file):
+    # Wyszukaj wszystkie pliki README.md w katalogu i podkatalogach
+    readme_files = glob.glob(os.path.join(directory, '**', 'README.md'), recursive=True)
+    
+    with open(output_file, 'w', encoding='utf-8') as outfile:
+        # Na początku pliku dodajemy spis treści
+        outfile.write("# Spis treści\n\n")
+        
+        # Zmienna do przechowywania już dodanych katalogów
+        added_dirs = set()
 
-def collect_readme_files(directory):
-    """Zbiera wszystkie pliki readme.md w katalogu i podkatalogach."""
-    readme_files = []
-    for root, dirs, files in os.walk(directory):
-        for file in files:
-            if file.lower() == "readme.md":
-                readme_files.append(os.path.join(root, file))
-    return readme_files  # Nie sortuj, zachowaj hierarchię katalogów
+        # Iteracja po wszystkich plikach README.md
+        for readme in readme_files:
+            # Uzyskaj katalog z pliku README.md
+            directory_name = os.path.dirname(readme)
+            
+            # Stwórz unikalny identyfikator nagłówka dla katalogu (zastąp spacje i inne znaki specjalne)
+            safe_directory_name = re.sub(r'[^a-zA-Z0-9]', '-', directory_name.lower())
+            
+            # Jeśli nie dodano jeszcze tego katalogu do spisu treści, dodaj go
+            if directory_name not in added_dirs:
+                # Dodaj link do spisu treści
+                outfile.write(f"- [{directory_name}](#{safe_directory_name})\n")
+                added_dirs.add(directory_name)
+        
+        # Dodaj separator
+        outfile.write("\n---\n\n")
+        
+        # Iteracja po plikach README.md, aby dodać zawartość
+        for readme in readme_files:
+            directory_name = os.path.dirname(readme)
+            
+            # Stwórz unikalny identyfikator nagłówka dla katalogu
+            safe_directory_name = re.sub(r'[^a-zA-Z0-9]', '-', directory_name.lower())
+            
+            # Dodaj nagłówek dla katalogu z odpowiednim identyfikatorem
+            outfile.write(f"## {directory_name}  <a name='{safe_directory_name}'></a>\n\n")
+            
+            # Odczytaj zawartość pliku README.md
+            with open(readme, 'r', encoding='utf-8') as infile:
+                content = infile.read()
+            
+            # Dodaj zawartość pliku do wynikowego pliku README.md
+            outfile.write(content)
+            outfile.write("\n\n---\n\n")  # Dodajemy separator między plikami
 
-def extract_tables_from_markdown(markdown_content):
-    """Wyszukuje tabele w treści Markdown i zwraca ich zawartość."""
-    tables = []
-    table_pattern = re.compile(r"(\|.+?\|\n\|[-| ]+\|\n(?:\|.+?\|\n)+)")
-    matches = table_pattern.findall(markdown_content)
-    tables.extend(matches)
-    return tables
+    print(f"Plik {output_file} został utworzony.")
 
-def generate_html_with_toc(readme_files):
-    """Generuje plik HTML z treścią wszystkich plików readme.md oraz spisem treści."""
-    # CSS dla stylizacji
-    css = """
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            margin: 20px;
-            background-color: #f9f9f9;
-        }
-        h1, h2 {
-            color: #2c3e50;
-        }
-        h1 {
-            text-align: center;
-        }
-        ul {
-            list-style-type: none;
-            padding: 0;
-        }
-        ul li {
-            margin: 5px 0;
-        }
-        ul li a {
-            text-decoration: none;
-            color: #3498db;
-        }
-        ul li a:hover {
-            text-decoration: underline;
-        }
-        hr {
-            border: 0;
-            height: 1px;
-            background: #ccc;
-            margin: 20px 0;
-        }
-        .toc {
-            background: #ecf0f1;
-            padding: 10px;
-            border-radius: 5px;
-        }
-        .toc ul {
-            padding-left: 20px;
-        }
-    </style>
-    """
-    html_content = f"<html><head><title>README Files</title>{css}</head><body>"
-    html_content += "<h1>Dokumentacja README</h1>"
-
-    # Spis treści
-    toc = "<div class='toc'><h2>Spis treści</h2><ul>"
-    toc = generate_toc(readme_files, toc)
-    toc += "</ul></div>"
-    html_content += toc
-
-    # Treść plików README
-    for readme_file in readme_files:
-        with open(readme_file, "r", encoding="utf-8") as f:
-            markdown_content = f.read()
-            html_fragment = markdown_to_html(markdown_content)
-            folder_name = os.path.basename(os.path.dirname(readme_file))  # Tylko nazwa folderu
-            html_content += f'<hr><h2 id="{folder_name}">{folder_name}</h2>'
-            html_content += html_fragment
-
-    html_content += "</body></html>"
-    return html_content
-
-def generate_toc(readme_files, toc, depth=0):
-    """Generuje spis treści w hierarchii katalogów z odpowiednimi wcięciami."""
-    files_by_folder = {}
-    for readme_file in readme_files:
-        folder = os.path.dirname(readme_file)
-        folder_name = os.path.basename(folder)
-        if folder_name not in files_by_folder:
-            files_by_folder[folder_name] = []
-        files_by_folder[folder_name].append(readme_file)
-
-    for folder_name, files in files_by_folder.items():
-        indent = "  " * depth  # Wcięcie zależne od głębokości
-        toc += f'<li>{indent}<a href="#{folder_name}">{folder_name}</a></li>'
-        toc = generate_toc(files, toc, depth + 1)  # Rekursywnie przetwarzaj podkatalogi
-    return toc
-
-def generate_combined_table(tables):
-    """Generuje jedną główną tabelę z wszystkich tabel w plikach Markdown."""
-    combined_table = "| Nazwa | Źródło | Level |\n|-------|--------|-------|\n"
-    for table in tables:
-        rows = table.strip().split("\n")[2:]  # Pomijamy nagłówki tabeli
-        combined_table += "\n".join(rows) + "\n"
-    return combined_table
-
-# Główna logika
-directory = "KATALOG"  # Ścieżka do głównego katalogu
-readme_files = collect_readme_files(directory)
-
-# Generowanie pliku HTML
-html_output = generate_html_with_toc(readme_files)
-with open("output.html", "w", encoding="utf-8") as f:
-    f.write(html_output)
-
-# Generowanie pliku Markdown z tabelami
-all_tables = []
-for readme_file in readme_files:
-    with open(readme_file, "r", encoding="utf-8") as f:
-        markdown_content = f.read()
-        tables = extract_tables_from_markdown(markdown_content)
-        all_tables.extend(tables)
-
-combined_table_md = generate_combined_table(all_tables)
-with open("combined_table.md", "w", encoding="utf-8") as f:
-    f.write(combined_table_md)
+# Użycie funkcji
+create_combined_readme('/ścieżka/do/katalogu', 'combined_README.md')
