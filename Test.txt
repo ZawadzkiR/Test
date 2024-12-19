@@ -74,8 +74,8 @@ def generate_html_with_toc(readme_files):
     toc = "<div class='toc'><h2>Spis treści</h2><ul>"
     for readme_file in readme_files:
         relative_path = os.path.relpath(readme_file)
-        folder_name = os.path.dirname(relative_path)
-        toc += f'<li><a href="#{relative_path.replace("/", "-")}">{folder_name}</a></li>'
+        folder_name = os.path.basename(os.path.dirname(relative_path))  # Tylko nazwa folderu
+        toc += f'<li><a href="#{folder_name}">{folder_name}</a></li>'
     toc += "</ul></div>"
     html_content += toc
 
@@ -84,9 +84,8 @@ def generate_html_with_toc(readme_files):
         with open(readme_file, "r", encoding="utf-8") as f:
             markdown_content = f.read()
             html_fragment = markdown_to_html(markdown_content)
-            relative_path = os.path.relpath(readme_file).replace("/", "-")
-            folder_name = os.path.dirname(os.path.relpath(readme_file))
-            html_content += f'<hr><h2 id="{relative_path}">{folder_name}</h2>'
+            folder_name = os.path.basename(os.path.dirname(readme_file))  # Tylko nazwa folderu
+            html_content += f'<hr><h2 id="{folder_name}">{folder_name}</h2>'
             html_content += html_fragment
 
     html_content += "</body></html>"
