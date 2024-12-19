@@ -5,7 +5,7 @@ from atlassian import Confluence
 # Funkcja do rekurencyjnego wyszukiwania plików README i tworzenia markdown
 
 def create_markdown_from_readme(directory, output_file, table_output_file):
-    table_of_contents = []
+    table_of_contents = ["# Spis treści"]
     content = []
     access_data = []
 
@@ -15,12 +15,16 @@ def create_markdown_from_readme(directory, output_file, table_output_file):
         if readme_files:
             relative_path = os.path.relpath(root, directory)
             depth = relative_path.count(os.sep)
+            header_id = relative_path.replace(os.sep, "-").replace(" ", "-").lower()
             header = f"{'#' * (depth + 1)} {relative_path}"
-            table_of_contents.append(header)
+            link = f"[{relative_path}](#{header_id})"
+            table_of_contents.append(f"{'  ' * depth}- {link}")
+
+            content.append(f"<a id='{header_id}'></a>")  # Anchor for navigation
+            content.append(header)
 
             for readme in readme_files:
                 with open(os.path.join(root, readme), 'r', encoding='utf-8') as f:
-                    content.append(header)
                     content.append(f"\n*Plik: {readme}*\n")
                     readme_content = f.read()
                     content.append(readme_content)
@@ -48,7 +52,8 @@ def create_markdown_from_readme(directory, output_file, table_output_file):
     if access_data:
         df = pd.DataFrame(access_data, columns=["Nazwa", "Źródło", "Level"])
         df.sort_values(by="Źródło", inplace=True)
-        df.to_markdown(table_output_file, index=False)
+        with open(table_output_file, 'w', encoding='utf-8') as tf:
+            tf.write(df.to_markdown(index=False))
 
 # Funkcja do przesłania markdown na Atlassian Wiki
 def upload_to_atlassian_wiki(confluence_url, username, api_token, space_key, parent_page_id, page_title, markdown_file):
