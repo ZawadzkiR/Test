@@ -1,6 +1,7 @@
 import os
 import glob
 import pandas as pd
+from io import StringIO  # Zmieniamy import na standardowy sposób
 
 def extract_table_from_readme(file_path):
     """
@@ -27,7 +28,7 @@ def extract_table_from_readme(file_path):
         # Połącz tabelę z listy w jeden ciąg znaków
         table_markdown = '\n'.join(table_lines)
         # Używamy pandas do wczytania tabeli w formacie markdown
-        df = pd.read_csv(pd.compat.StringIO(table_markdown), sep="|", engine='python').iloc[:, 1:-1]
+        df = pd.read_csv(StringIO(table_markdown), sep="|", engine='python').iloc[:, 1:-1]
         df.columns = [col.strip() for col in df.columns]
         return df
     return None
