@@ -1,28 +1,35 @@
 import os
 import glob
 import pandas as pd
-from bs4 import BeautifulSoup
 
 def extract_table_from_readme(file_path):
     """
-    Funkcja do wyciągania tabeli 'dostepy' z pliku README.md
+    Funkcja do wyciągania tabeli 'dostepy' z pliku README.md w formacie Markdown
     """
     with open(file_path, 'r', encoding='utf-8') as file:
         content = file.read()
 
-    # Przekształcenie zawartości README.md na obiekt BeautifulSoup
-    soup = BeautifulSoup(content, 'html.parser')
+    # Szukamy wszystkich tabel w formacie Markdown
+    lines = content.split('\n')
+    table_start = False
+    table_lines = []
+    
+    for line in lines:
+        if line.startswith('|'):
+            # Dodajemy linie tabeli do listy
+            table_lines.append(line)
+            table_start = True
+        elif table_start and line.strip() == '':
+            # Koniec tabeli, przerwij
+            break
 
-    # Szukamy tabel w pliku
-    tables = soup.find_all('table')
-
-    # Szukamy tabeli, która zawiera kolumny 'Nazwa', 'źródło' i 'level'
-    for table in tables:
-        headers = [th.get_text(strip=True) for th in table.find_all('th')]
-        if 'Nazwa' in headers and 'źródło' in headers and 'level' in headers:
-            # Zamiana tabeli na DataFrame pandas
-            df = pd.read_html(str(table))[0]
-            return df
+    if table_lines:
+        # Połącz tabelę z listy w jeden ciąg znaków
+        table_markdown = '\n'.join(table_lines)
+        # Używamy pandas do wczytania tabeli w formacie markdown
+        df = pd.read_csv(pd.compat.StringIO(table_markdown), sep="|", engine='python').iloc[:, 1:-1]
+        df.columns = [col.strip() for col in df.columns]
+        return df
     return None
 
 def create_combined_table(directory, output_file):
@@ -42,7 +49,7 @@ def create_combined_table(directory, output_file):
     # Usuwanie duplikatów
     combined_df.drop_duplicates(inplace=True)
 
-    # Zapisanie wynikowej tabeli do pliku README.md
+    # Zapisanie wynikowej tabeli do pliku README.md w formacie markdown
     with open(output_file, 'w', encoding='utf-8') as outfile:
         outfile.write("# Połączona tabela dostępów\n\n")
         outfile.write(combined_df.to_markdown(index=False))
