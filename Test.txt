@@ -1,76 +1,53 @@
-import glob
 import os
-import re
+import glob
+import pandas as pd
+from bs4 import BeautifulSoup
 
-def create_combined_readme(directory, output_file):
-    # Wyszukaj wszystkie pliki README.md w katalogu i podkatalogach
+def extract_table_from_readme(file_path):
+    """
+    Funkcja do wyciągania tabeli 'dostepy' z pliku README.md
+    """
+    with open(file_path, 'r', encoding='utf-8') as file:
+        content = file.read()
+
+    # Przekształcenie zawartości README.md na obiekt BeautifulSoup
+    soup = BeautifulSoup(content, 'html.parser')
+
+    # Szukamy tabel w pliku
+    tables = soup.find_all('table')
+
+    # Szukamy tabeli, która zawiera kolumny 'Nazwa', 'źródło' i 'level'
+    for table in tables:
+        headers = [th.get_text(strip=True) for th in table.find_all('th')]
+        if 'Nazwa' in headers and 'źródło' in headers and 'level' in headers:
+            # Zamiana tabeli na DataFrame pandas
+            df = pd.read_html(str(table))[0]
+            return df
+    return None
+
+def create_combined_table(directory, output_file):
+    """
+    Funkcja do wyciągania tabel dostepów z plików README.md i zapisania ich w jednym pliku
+    """
     readme_files = glob.glob(os.path.join(directory, '**', 'README.md'), recursive=True)
-    
+    combined_df = pd.DataFrame(columns=["Nazwa", "źródło", "level"])
+
+    # Iteracja po plikach README.md
+    for readme in readme_files:
+        table_df = extract_table_from_readme(readme)
+        if table_df is not None:
+            # Dodajemy dane do złączonej tabeli
+            combined_df = pd.concat([combined_df, table_df], ignore_index=True)
+
+    # Usuwanie duplikatów
+    combined_df.drop_duplicates(inplace=True)
+
+    # Zapisanie wynikowej tabeli do pliku README.md
     with open(output_file, 'w', encoding='utf-8') as outfile:
-        # Na początku pliku dodajemy spis treści
-        outfile.write("# Spis treści\n\n")
-        
-        # Zmienna do przechowywania już dodanych katalogów
-        added_dirs = set()
-
-        # Funkcja do generowania wcięcia na podstawie głębokości katalogu
-        def generate_indent(level):
-            return '    ' * level  # Cztery spacje na każde wcięcie
-
-        # Iteracja po wszystkich plikach README.md
-        for readme in readme_files:
-            # Uzyskaj katalog z pliku README.md
-            directory_name = os.path.dirname(readme)
-            
-            # Stwórz unikalny identyfikator nagłówka dla katalogu (zastąp spacje i inne znaki specjalne)
-            safe_directory_name = re.sub(r'[^a-zA-Z0-9]', '-', directory_name.lower())
-            
-            # Podziel ścieżkę na katalogi
-            path_parts = directory_name.split(os.sep)
-            
-            # Głębokość katalogu (liczba części w ścieżce - 1)
-            indent_level = len(path_parts) - 1
-
-            # Nazwa ostatniego katalogu
-            last_dir = path_parts[-1]
-            
-            # Jeśli nie dodano jeszcze tego katalogu do spisu treści, dodaj go
-            if directory_name not in added_dirs:
-                # Dodaj link do spisu treści z odpowiednim wcięciem
-                outfile.write(f"{generate_indent(indent_level)}- [{last_dir}](#{safe_directory_name})\n")
-                added_dirs.add(directory_name)
-        
-        # Dodaj separator
-        outfile.write("\n---\n\n")
-        
-        # Iteracja po plikach README.md, aby dodać zawartość
-        for readme in readme_files:
-            directory_name = os.path.dirname(readme)
-            
-            # Stwórz unikalny identyfikator nagłówka dla katalogu
-            safe_directory_name = re.sub(r'[^a-zA-Z0-9]', '-', directory_name.lower())
-            
-            # Podziel ścieżkę na katalogi
-            path_parts = directory_name.split(os.sep)
-            
-            # Głębokość katalogu
-            indent_level = len(path_parts) - 1
-            
-            # Nazwa ostatniego katalogu
-            last_dir = path_parts[-1]
-            
-            # Dodaj nagłówek dla katalogu z odpowiednim identyfikatorem
-            outfile.write(f"## {last_dir}  <a name='{safe_directory_name}'></a>\n\n")
-            
-            # Odczytaj zawartość pliku README.md
-            with open(readme, 'r', encoding='utf-8') as infile:
-                content = infile.read()
-            
-            # Dodaj zawartość pliku do wynikowego pliku README.md
-            outfile.write(content)
-            outfile.write("\n\n---\n\n")  # Dodajemy separator między plikami
+        outfile.write("# Połączona tabela dostępów\n\n")
+        outfile.write(combined_df.to_markdown(index=False))
 
     print(f"Plik {output_file} został utworzony.")
 
 # Użycie funkcji
-create_combined_readme('/ścieżka/do/katalogu', 'combined_README.md')
+create_combined_table('/ścieżka/do/katalogu', 'combined_dostepy_README.md')
