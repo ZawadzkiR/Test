@@ -1,75 +1,122 @@
 import os
+import markdown
 import re
-from bs4 import BeautifulSoup
-
-def create_html_with_toc_and_content(root_dir, output_file):
-    toc = []
-    html_content = ["<html><head><title>Zebrane README</title></head><body>"]
-
-    for current_dir, _, files in os.walk(root_dir):
-        relative_dir = os.path.relpath(current_dir, root_dir)
-        readme_path = os.path.join(current_dir, "readme.md")
-
-        if "readme.md" in files:
-            toc.append(relative_dir)
-            html_content.append(f"<h2 id='{relative_dir}'>{relative_dir}</h2>")
-            
-            with open(readme_path, "r", encoding="utf-8") as f:
-                content = f.read()
-                html_content.append(markdown_to_html(content))
-
-    # Dodajemy spis treści na początku
-    html_content.insert(1, "<h1>Spis treści</h1><ul>")
-    for dir_name in toc:
-        html_content.insert(2, f"<li><a href='#{dir_name}'>{dir_name}</a></li>")
-    html_content.insert(3, "</ul>")
-
-    html_content.append("</body></html>")
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write("\n".join(html_content))
-
-def collect_tables_from_readme(root_dir, output_file):
-    all_tables = []
-
-    for current_dir, _, files in os.walk(root_dir):
-        readme_path = os.path.join(current_dir, "readme.md")
-
-        if "readme.md" in files:
-            with open(readme_path, "r", encoding="utf-8") as f:
-                content = f.read()
-                tables = extract_tables(content)
-                all_tables.extend(tables)
-
-    # Zapisanie tabel w formacie Markdown
-    if all_tables:
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write("# Zebrane tabele\n\n")
-            for table in all_tables:
-                f.write(table)
-                f.write("\n\n")
-
-def extract_tables(content):
-    """Wyszukuje tabele w pliku Markdown."""
-    table_pattern = re.compile(r"(\|.*?\|\n)(\|[-:| ]+\|\n)((\|.*?\|\n)+)", re.DOTALL)
-    matches = table_pattern.findall(content)
-    return [match[0] + match[1] + match[2] for match in matches]
 
 def markdown_to_html(markdown_content):
     """Konwertuje Markdown na HTML."""
-    try:
-        from markdown2 import markdown
-        return markdown(markdown_content)
-    except ImportError:
-        soup = BeautifulSoup(markdown_content, "html.parser")
-        return str(soup)
+    return markdown.markdown(markdown_content)
 
-if __name__ == "__main__":
-    root_directory = "KATALOG"
-    html_output = "zebrane_readme.html"
-    table_output = "zebrane_tabele.md"
+def collect_readme_files(directory):
+    """Zbiera wszystkie pliki readme.md w katalogu i podkatalogach."""
+    readme_files = []
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            if file.lower() == "readme.md":
+                readme_files.append(os.path.join(root, file))
+    return sorted(readme_files, key=lambda x: x.lower())  # Sortuj alfabetycznie
 
-    create_html_with_toc_and_content(root_directory, html_output)
-    collect_tables_from_readme(root_directory, table_output)
+def extract_tables_from_markdown(markdown_content):
+    """Wyszukuje tabele w treści Markdown i zwraca ich zawartość."""
+    tables = []
+    table_pattern = re.compile(r"(\|.+?\|\n\|[-| ]+\|\n(?:\|.+?\|\n)+)")
+    matches = table_pattern.findall(markdown_content)
+    tables.extend(matches)
+    return tables
 
-    print(f"Plik HTML zapisany jako: {html_output}")
-    print(f"Plik z tabelami zapisany jako: {table_output}")
+def generate_html_with_toc(readme_files):
+    """Generuje plik HTML z treścią wszystkich plików readme.md oraz spisem treści."""
+    # CSS dla stylizacji
+    css = """
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 20px;
+            background-color: #f9f9f9;
+        }
+        h1, h2 {
+            color: #2c3e50;
+        }
+        h1 {
+            text-align: center;
+        }
+        ul {
+            list-style-type: none;
+            padding: 0;
+        }
+        ul li {
+            margin: 5px 0;
+        }
+        ul li a {
+            text-decoration: none;
+            color: #3498db;
+        }
+        ul li a:hover {
+            text-decoration: underline;
+        }
+        hr {
+            border: 0;
+            height: 1px;
+            background: #ccc;
+            margin: 20px 0;
+        }
+        .toc {
+            background: #ecf0f1;
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
+    """
+    html_content = f"<html><head><title>README Files</title>{css}</head><body>"
+    html_content += "<h1>Dokumentacja README</h1>"
+
+    # Spis treści
+    toc = "<div class='toc'><h2>Spis treści</h2><ul>"
+    for readme_file in readme_files:
+        relative_path = os.path.relpath(readme_file)
+        folder_name = os.path.dirname(relative_path)
+        toc += f'<li><a href="#{relative_path.replace("/", "-")}">{folder_name}</a></li>'
+    toc += "</ul></div>"
+    html_content += toc
+
+    # Treść plików README
+    for readme_file in readme_files:
+        with open(readme_file, "r", encoding="utf-8") as f:
+            markdown_content = f.read()
+            html_fragment = markdown_to_html(markdown_content)
+            relative_path = os.path.relpath(readme_file).replace("/", "-")
+            folder_name = os.path.dirname(os.path.relpath(readme_file))
+            html_content += f'<hr><h2 id="{relative_path}">{folder_name}</h2>'
+            html_content += html_fragment
+
+    html_content += "</body></html>"
+    return html_content
+
+def generate_combined_table(tables):
+    """Generuje jedną główną tabelę z wszystkich tabel w plikach Markdown."""
+    combined_table = "| Nazwa | Źródło | Level |\n|-------|--------|-------|\n"
+    for table in tables:
+        rows = table.strip().split("\n")[2:]  # Pomijamy nagłówki tabeli
+        combined_table += "\n".join(rows) + "\n"
+    return combined_table
+
+# Główna logika
+directory = "KATALOG"  # Ścieżka do głównego katalogu
+readme_files = collect_readme_files(directory)
+
+# Generowanie pliku HTML
+html_output = generate_html_with_toc(readme_files)
+with open("output.html", "w", encoding="utf-8") as f:
+    f.write(html_output)
+
+# Generowanie pliku Markdown z tabelami
+all_tables = []
+for readme_file in readme_files:
+    with open(readme_file, "r", encoding="utf-8") as f:
+        markdown_content = f.read()
+        tables = extract_tables_from_markdown(markdown_content)
+        all_tables.extend(tables)
+
+combined_table_md = generate_combined_table(all_tables)
+with open("combined_table.md", "w", encoding="utf-8") as f:
+    f.write(combined_table_md)
