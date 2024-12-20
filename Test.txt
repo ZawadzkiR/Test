@@ -1,7 +1,7 @@
 import re
 
 def markdown_to_confluence_wiki(md_text):
-    # Nagłówki z pogrubieniem
+    # Nagłówki
     md_text = re.sub(r"^###### (.+)", r"h6. \1", md_text, flags=re.MULTILINE)
     md_text = re.sub(r"^##### (.+)", r"h5. \1", md_text, flags=re.MULTILINE)
     md_text = re.sub(r"^#### (.+)", r"h4. \1", md_text, flags=re.MULTILINE)
@@ -29,10 +29,10 @@ def markdown_to_confluence_wiki(md_text):
     # Kod inline
     md_text = re.sub(r"`([^`]+)`", r"{{\1}}", md_text)
 
-    # Pogrubienie i kursywa, z uwzględnieniem obu jednocześnie
-    md_text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", md_text)  # Pogrubienie
-    md_text = re.sub(r"\*(.*?)\*", r"_\1_", md_text)      # Kursywa
-    md_text = re.sub(r"\*\*(.*?)\*(.*?)\*\*", r"*\1*\2*", md_text)  # Pogrubienie + Kursywa
+    # Pogrubienie, kursywa oraz połączenie obu
+    md_text = re.sub(r"\*\*\*(.*?)\*\*\*", r"*_\1_*", md_text)  # Pogrubienie + Kursywa
+    md_text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", md_text)        # Pogrubienie
+    md_text = re.sub(r"\*(.*?)\*", r"_\1_", md_text)            # Kursywa
 
     # Tabele
     def convert_table(match):
