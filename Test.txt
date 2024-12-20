@@ -1,68 +1,66 @@
-import os
-import glob
-import pandas as pd
-from io import StringIO
+def markdown_to_confluence_wiki(md_text):
+    import re
 
-def extract_table_from_readme(file_path):
-    """
-    Funkcja do wyciągania tabeli 'dostepy' z pliku README.md w formacie Markdown
-    tylko jeśli zawiera odpowiednie kolumny: 'Nazwa', 'źródło', 'level'
-    """
-    with open(file_path, 'r', encoding='utf-8') as file:
-        content = file.read()
+    # Nagłówki
+    md_text = re.sub(r"^# (.+)", r"h1. \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^## (.+)", r"h2. \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^### (.+)", r"h3. \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^#### (.+)", r"h4. \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^##### (.+)", r"h5. \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^###### (.+)", r"h6. \1", md_text, flags=re.MULTILINE)
 
-    # Szukamy wszystkich tabel w formacie Markdown
-    lines = content.split('\n')
-    table_start = False
-    table_lines = []
-    tables = []
-    
-    for line in lines:
-        if line.startswith('|'):
-            # Dodajemy linie tabeli do listy
-            table_lines.append(line)
-            table_start = True
-        elif table_start and line.strip() == '':
-            # Koniec tabeli, zapisujemy tabelę
-            tables.append(table_lines)
-            table_lines = []  # Resetujemy listę dla kolejnej tabeli
-            table_start = False
+    # Listy punktowane i numerowane
+    md_text = re.sub(r"^\* (.+)", r"* \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^\- (.+)", r"* \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^\d+\. (.+)", r"# \1", md_text, flags=re.MULTILINE)
 
-    # Przechodzimy przez wszystkie znalezione tabele i weryfikujemy, która ma odpowiednie kolumny
-    for table in tables:
-        table_markdown = '\n'.join(table)
-        df = pd.read_csv(StringIO(table_markdown), sep="|", engine='python').iloc[:, 1:-1]
-        df.columns = [col.strip() for col in df.columns]
+    # Cytaty
+    md_text = re.sub(r"^> (.+)", r"{quote}\n\1\n{quote}", md_text, flags=re.MULTILINE)
 
-        # Sprawdzamy, czy tabela ma odpowiednie kolumny
-        if set(["Nazwa", "źródło", "level"]).issubset(df.columns):
-            return df  # Zwracamy tę tabelę
+    # Linki
+    md_text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"[\1|\2]", md_text)
 
-    return None  # Jeśli nie znaleziono odpowiedniej tabeli
+    # Obrazy
+    md_text = re.sub(r"!\[.*?\]\((.*?)\)", r"!\1!", md_text)
 
-def create_combined_table(directory, output_file):
-    """
-    Funkcja do wyciągania tabel dostepów z plików README.md i zapisania ich w jednym pliku
-    """
-    readme_files = glob.glob(os.path.join(directory, '**', 'README.md'), recursive=True)
-    combined_df = pd.DataFrame(columns=["Nazwa", "źródło", "level"])
+    # Kod blokowy
+    md_text = re.sub(r"```([a-zA-Z]*)\n(.*?)```", r"{code:\1}\n\2\n{code}", md_text, flags=re.DOTALL)
 
-    # Iteracja po plikach README.md
-    for readme in readme_files:
-        table_df = extract_table_from_readme(readme)
-        if table_df is not None:
-            # Dodajemy dane do złączonej tabeli
-            combined_df = pd.concat([combined_df, table_df], ignore_index=True)
+    # Kod inline
+    md_text = re.sub(r"`([^`]+)`", r"{{\1}}", md_text)
 
-    # Usuwanie duplikatów
-    combined_df.drop_duplicates(inplace=True)
+    # Pogrubienie i kursywa
+    md_text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", md_text)
+    md_text = re.sub(r"\*(.*?)\*", r"_\1_", md_text)
 
-    # Zapisanie wynikowej tabeli do pliku README.md w formacie markdown
-    with open(output_file, 'w', encoding='utf-8') as outfile:
-        outfile.write("# Połączona tabela dostępów\n\n")
-        outfile.write(combined_df.to_markdown(index=False))
+    # Tabele
+    def convert_table(match):
+        rows = match.group(0).strip().split("\n")
+        header = rows[0].split("|")[1:-1]
+        separator = rows[1].split("|")[1:-1]
+        body = rows[2:]
 
-    print(f"Plik {output_file} został utworzony.")
+        # Nagłówki tabeli
+        wiki_table = "|| " + " || ".join(header) + " ||\n"
 
-# Użycie funkcji
-create_combined_table('/ścieżka/do/katalogu', 'combined_dostepy_README.md')
+        # Wiersze tabeli
+        for row in body:
+            cells = row.split("|")[1:-1]
+            wiki_table += "| " + " | ".join(cells) + " |\n"
+        return wiki_table
+
+    md_text = re.sub(r"(?m)^\|.+?\|\n\|[-|:]+?\|\n(?:\|.+?\|\n)+", convert_table, md_text)
+
+    # Spis treści
+    md_text = re.sub(r"(?i)^\[toc\]$", r"{toc}", md_text, flags=re.MULTILINE)
+
+    # Linie poziome
+    md_text = re.sub(r"^---$", r"----", md_text, flags=re.MULTILINE)
+
+    # Podkreślenia
+    md_text = re.sub(r"<u>(.*?)</u>", r"+\1+", md_text)
+
+    # Kolory
+    md_text = re.sub(r"<span style=\"color: (.+?);\">(.*?)</span>", r"{color:\1}\2{color}", md_text)
+
+    return md_text
