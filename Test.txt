@@ -1,13 +1,13 @@
-def markdown_to_confluence_wiki(md_text):
-    import re
+import re
 
-    # Nagłówki
-    md_text = re.sub(r"^# (.+)", r"h1. \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^## (.+)", r"h2. \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^### (.+)", r"h3. \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^#### (.+)", r"h4. \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^##### (.+)", r"h5. \1", md_text, flags=re.MULTILINE)
+def markdown_to_confluence_wiki(md_text):
+    # Nagłówki z pogrubieniem
     md_text = re.sub(r"^###### (.+)", r"h6. \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^##### (.+)", r"h5. \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^#### (.+)", r"h4. \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^### (.+)", r"h3. \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^## (.+)", r"h2. \1", md_text, flags=re.MULTILINE)
+    md_text = re.sub(r"^# (.+)", r"h1. \1", md_text, flags=re.MULTILINE)
 
     # Listy punktowane i numerowane
     md_text = re.sub(r"^\* (.+)", r"* \1", md_text, flags=re.MULTILINE)
@@ -29,9 +29,10 @@ def markdown_to_confluence_wiki(md_text):
     # Kod inline
     md_text = re.sub(r"`([^`]+)`", r"{{\1}}", md_text)
 
-    # Pogrubienie i kursywa
-    md_text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", md_text)
-    md_text = re.sub(r"\*(.*?)\*", r"_\1_", md_text)
+    # Pogrubienie i kursywa, z uwzględnieniem obu jednocześnie
+    md_text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", md_text)  # Pogrubienie
+    md_text = re.sub(r"\*(.*?)\*", r"_\1_", md_text)      # Kursywa
+    md_text = re.sub(r"\*\*(.*?)\*(.*?)\*\*", r"*\1*\2*", md_text)  # Pogrubienie + Kursywa
 
     # Tabele
     def convert_table(match):
@@ -57,10 +58,10 @@ def markdown_to_confluence_wiki(md_text):
     # Linie poziome
     md_text = re.sub(r"^---$", r"----", md_text, flags=re.MULTILINE)
 
+    # Kolory
+    md_text = re.sub(r"<span style=['\"]color:(.*?);['\"]>(.*?)</span>", r"{color:\1}\2{color}", md_text)
+
     # Podkreślenia
     md_text = re.sub(r"<u>(.*?)</u>", r"+\1+", md_text)
-
-    # Kolory
-    md_text = re.sub(r"<span style=\"color: (.+?);\">(.*?)</span>", r"{color:\1}\2{color}", md_text)
 
     return md_text
