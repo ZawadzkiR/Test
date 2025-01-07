@@ -1,67 +1,167 @@
-import re
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+import subprocess
+from crontab import CronTab
+import os
+from git import Repo
+import argparseygfc
+import json
 
-def markdown_to_confluence_wiki(md_text):
-    # Nagłówki
-    md_text = re.sub(r"^###### (.+)", r"h6. \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^##### (.+)", r"h5. \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^#### (.+)", r"h4. \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^### (.+)", r"h3. \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^## (.+)", r"h2. \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^# (.+)", r"h1. \1", md_text, flags=re.MULTILINE)
+# -------------------- ZAKŁADKA RUN --------------------
+processes = {
+    'Proces 1': '/path/to/script1.py',
+    'Proces 2': '/path/to/script2.py',
+    'Proces 3': '/path/to/script3.py',
+}
+output_run = widgets.Output()
+running = False
 
-    # Listy punktowane i numerowane
-    md_text = re.sub(r"^\* (.+)", r"* \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^\- (.+)", r"* \1", md_text, flags=re.MULTILINE)
-    md_text = re.sub(r"^\d+\. (.+)", r"# \1", md_text, flags=re.MULTILINE)
+def run_process(path):
+    global running
+    if running:
+        with output_run:
+            output_run.clear_output()
+            print("Inny proces jest już uruchomiony. Proszę poczekać.")
+        return
 
-    # Cytaty
-    md_text = re.sub(r"^> (.+)", r"{quote}\n\1\n{quote}", md_text, flags=re.MULTILINE)
+    running = True
+    with output_run:
+        output_run.clear_output()
+        print(f'Uruchamianie {path}...')
 
-    # Linki
-    md_text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"[\1|\2]", md_text)
+    try:
+        result = subprocess.run(['python3', path], check=True, capture_output=True, text=True)
+        with output_run:
+            output_run.clear_output()
+            print(f'Proces {path} zakończony sukcesem.\n\nWyjście:\n{result.stdout}')
+    except subprocess.CalledProcessError as e:
+        with output_run:
+            output_run.clear_output()
+            print(f'Błąd podczas uruchamiania {path}:\n{e.stderr}')
+    finally:
+        running = False
 
-    # Obrazy
-    md_text = re.sub(r"!\[.*?\]\((.*?)\)", r"!\1!", md_text)
+widgets_run = []
+header_run = widgets.HBox([widgets.HTML('<b>Nazwa procesu</b>'), widgets.HTML('<b>Uruchomienie procesu</b>')],
+                          layout=widgets.Layout(justify_content='space-between', padding='10px', border='solid 1px black', background_color='#f0f0f0'))
+widgets_run.append(header_run)
 
-    # Kod blokowy
-    md_text = re.sub(r"```([a-zA-Z]*)\n(.*?)```", r"{code:\1}\n\2\n{code}", md_text, flags=re.DOTALL)
+for name, path in processes.items():
+    button = widgets.Button(description='Uruchom', layout=widgets.Layout(width='auto'))
+    button.on_click(lambda b, p=path: run_process(p))
+    row = widgets.HBox([widgets.Label(name), button],
+                       layout=widgets.Layout(justify_content='space-between', padding='10px', border='solid 1px black'))
+    widgets_run.append(row)
 
-    # Kod inline
-    md_text = re.sub(r"`([^`]+)`", r"{{\1}}", md_text)
+table_run = widgets.VBox(widgets_run, layout=widgets.Layout(width='50%', margin='auto'))
+run_tab = widgets.VBox([table_run, output_run])
 
-    # Pogrubienie, kursywa oraz połączenie obu
-    md_text = re.sub(r"\*\*\*(.*?)\*\*\*", r"*_\1_*", md_text)  # Pogrubienie + Kursywa
-    md_text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", md_text)        # Pogrubienie
-    md_text = re.sub(r"\*(.*?)\*", r"_\1_", md_text)            # Kursywa
+# -------------------- ZAKŁADKA TASKSCHEDULER --------------------
+cron = CronTab(user=True)
+output_scheduler = widgets.Output()
 
-    # Tabele
-    def convert_table(match):
-        rows = match.group(0).strip().split("\n")
-        header = rows[0].split("|")[1:-1]
-        separator = rows[1].split("|")[1:-1]
-        body = rows[2:]
+command_input = widgets.Text(description="Komenda:")
+comment_input = widgets.Text(description="Komentarz:")
+time_input = widgets.Text(description="Czas:")
+add_button = widgets.Button(description="Dodaj Zadanie")
+load_jobs_button = widgets.Button(description="Odśwież")
+job_selector = widgets.Dropdown(description="Wybierz zadanie:")
 
-        # Nagłówki tabeli
-        wiki_table = "|| " + " || ".join(header) + " ||\n"
+add_button.on_click(lambda b: add_cron_job())
+load_jobs_button.on_click(lambda b: load_cron_jobs())
 
-        # Wiersze tabeli
-        for row in body:
-            cells = row.split("|")[1:-1]
-            wiki_table += "| " + " | ".join(cells) + " |\n"
-        return wiki_table
+def add_cron_job():
+    job = cron.new(command=command_input.value, comment=comment_input.value)
+    job.setall(time_input.value)
+    cron.write()
+    load_cron_jobs()
+    with output_scheduler:
+        clear_output()
+        print("Dodano nowe zadanie do crontaba.")
 
-    md_text = re.sub(r"(?m)^\|.+?\|\n\|[-|:]+?\|\n(?:\|.+?\|\n)+", convert_table, md_text)
+def load_cron_jobs():
+    jobs = [(job.comment, job) for job in cron]
+    job_selector.options = jobs if jobs else ["Brak zadań"]
 
-    # Spis treści
-    md_text = re.sub(r"(?i)^\[toc\]$", r"{toc}", md_text, flags=re.MULTILINE)
+load_cron_jobs()
+scheduler_tab = widgets.VBox([command_input, comment_input, time_input, add_button, load_jobs_button, job_selector, output_scheduler])
 
-    # Linie poziome
-    md_text = re.sub(r"^---$", r"----", md_text, flags=re.MULTILINE)
+# -------------------- ZAKŁADKA PASSWORDS --------------------
+systems = ["System1", "System2", "System3"]
+selected_system = widgets.Dropdown(options=systems, description="System:")
+password_input = widgets.Password(description="Hasło:")
+create_button = widgets.Button(description="Utwórz")
+output_passwords = widgets.Output()
 
-    # Kolory
-    md_text = re.sub(r"<span style=['\"]color:(.*?);['\"]>(.*?)</span>", r"{color:\1}\2{color}", md_text)
+def create_password_file(button):
+    system = selected_system.value
+    password = password_input.value
+    os.makedirs("pwd", exist_ok=True)
+    with open(f"pwd/{system}.txt", "w") as file:
+        file.write(password)
+    with output_passwords:
+        clear_output()
+        print(f"Hasło zapisane dla {system}.")
 
-    # Podkreślenia
-    md_text = re.sub(r"<u>(.*?)</u>", r"+\1+", md_text)
+create_button.on_click(create_password_file)
+passwords_tab = widgets.VBox([selected_system, password_input, create_button, output_passwords])
 
-    return md_text
+# -------------------- ZAKŁADKA RUN ARGS --------------------
+processes_with_args = {
+    'Kod1': '/path/to/code1.py',
+    'Kod2': '/path/to/code2.py',
+    'Kod3': '/path/to/code3.py',
+}
+output_run_args = widgets.Output()
+selected_process = widgets.Dropdown(options=processes_with_args.keys(), description="Proces:")
+arguments_box = widgets.VBox()
+run_args_button = widgets.Button(description="Uruchom z argumentami")
+
+
+def load_args(button):
+    script_path = processes_with_args[selected_process.value]
+    parser = argparse.ArgumentParser()
+    with open(script_path, "r") as f:
+        code = compile(f.read(), script_path, "exec")
+        exec(code)
+    args = parser.parse_args([])
+
+    widgets_args = []
+    for arg, value in vars(args).items():
+        widgets_args.append(widgets.Text(value=str(value), description=arg))
+    arguments_box.children = widgets_args
+
+run_args_button.on_click(load_args)
+run_args_tab = widgets.VBox([selected_process, arguments_box, run_args_button, output_run_args])
+
+# -------------------- ZAKŁADKA UPDATE --------------------
+repo_path = '/path/to/repo'
+update_output = widgets.Output()
+update_button = widgets.Button(description="Sprawdź", button_style="success")
+
+
+def check_update(button):
+    repo = Repo(repo_path)
+    origin = repo.remote(name='origin')
+    origin.fetch()
+
+    if repo.head.commit != origin.refs.master.commit:
+        button.button_style = 'warning'
+        button.description = 'Update!'
+    else:
+        button.button_style = 'success'
+        button.description = 'Aktualne'
+
+update_button.on_click(check_update)
+update_tab = widgets.VBox([update_button, update_output])
+
+# -------------------- TWORZENIE MENU --------------------
+tabs = widgets.Tab()
+tabs.children = [run_tab, scheduler_tab, passwords_tab, run_args_tab, update_tab]
+tabs.set_title(0, "RUN")
+tabs.set_title(1, "TaskScheduler")
+tabs.set_title(2, "Passwords")
+tabs.set_title(3, "RUN args")
+tabs.set_title(4, "UPDATE")
+
+display(tabs)
