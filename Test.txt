@@ -1,167 +1,113 @@
 import ipywidgets as widgets
 from IPython.display import display, clear_output
+import importlib.util
+import sys
 import subprocess
-from crontab import CronTab
-import os
-from git import Repo
-import argparseygfc
-import json
+import argparse
 
-# -------------------- ZAKŁADKA RUN --------------------
-processes = {
-    'Proces 1': '/path/to/script1.py',
-    'Proces 2': '/path/to/script2.py',
-    'Proces 3': '/path/to/script3.py',
+# Ścieżki do skryptów
+scripts = {
+    "kod1": "/path/to/kod1.py",
+    "kod2": "/path/to/kod2.py"
 }
-output_run = widgets.Output()
-running = False
 
-def run_process(path):
-    global running
-    if running:
-        with output_run:
-            output_run.clear_output()
-            print("Inny proces jest już uruchomiony. Proszę poczekać.")
-        return
-
-    running = True
-    with output_run:
-        output_run.clear_output()
-        print(f'Uruchamianie {path}...')
-
+# Funkcja do ładowania argumentów
+def load_args(script_path):
+    args = {}
     try:
-        result = subprocess.run(['python3', path], check=True, capture_output=True, text=True)
-        with output_run:
-            output_run.clear_output()
-            print(f'Proces {path} zakończony sukcesem.\n\nWyjście:\n{result.stdout}')
-    except subprocess.CalledProcessError as e:
-        with output_run:
-            output_run.clear_output()
-            print(f'Błąd podczas uruchamiania {path}:\n{e.stderr}')
-    finally:
-        running = False
+        # Importowanie skryptu jako modułu
+        spec = importlib.util.spec_from_file_location("module.name", script_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["module.name"] = module
+        spec.loader.exec_module(module)
 
-widgets_run = []
-header_run = widgets.HBox([widgets.HTML('<b>Nazwa procesu</b>'), widgets.HTML('<b>Uruchomienie procesu</b>')],
-                          layout=widgets.Layout(justify_content='space-between', padding='10px', border='solid 1px black', background_color='#f0f0f0'))
-widgets_run.append(header_run)
+        # Sprawdzenie, czy parser istnieje globalnie
+        if hasattr(module, "parser") and isinstance(module.parser, argparse.ArgumentParser):
+            parser = module.parser
+            for action in parser._actions:
+                if action.dest != "help":  # Pomijamy akcję pomocy
+                    args[action.dest] = action.default
+    except Exception as e:
+        print(f"Błąd podczas wczytywania argumentów: {e}")
+    return args
 
-for name, path in processes.items():
-    button = widgets.Button(description='Uruchom', layout=widgets.Layout(width='auto'))
-    button.on_click(lambda b, p=path: run_process(p))
-    row = widgets.HBox([widgets.Label(name), button],
-                       layout=widgets.Layout(justify_content='space-between', padding='10px', border='solid 1px black'))
-    widgets_run.append(row)
+# Funkcja do uruchamiania skryptu
+def run_script(script_path, args):
+    cmd = ["python3", script_path]
+    for key, value in args.items():
+        cmd.append(f"--{key}")
+        cmd.append(str(value))
+    
+    try:
+        result = subprocess.run(cmd, text=True, capture_output=True)
+        return result.stdout, result.stderr
+    except Exception as e:
+        return "", str(e)
 
-table_run = widgets.VBox(widgets_run, layout=widgets.Layout(width='50%', margin='auto'))
-run_tab = widgets.VBox([table_run, output_run])
+# Interfejs z ipywidgets
+def create_interface():
+    # Dropdown do wyboru skryptu
+    script_dropdown = widgets.Dropdown(
+        options=[""] + list(scripts.keys()),
+        description="Skrypt:"
+    )
 
-# -------------------- ZAKŁADKA TASKSCHEDULER --------------------
-cron = CronTab(user=True)
-output_scheduler = widgets.Output()
+    # Kontener na dynamiczne pola argumentów
+    args_box = widgets.VBox()
+    
+    # Przycisk do uruchamiania skryptu
+    run_button = widgets.Button(description="Uruchom")
+    
+    # Pole do wyświetlania wyników
+    output_box = widgets.Output()
+    
+    # Obsługa zmiany wyboru skryptu
+    def on_script_change(change):
+        if not change.new:
+            args_box.children = []
+            return
+        
+        script_path = scripts.get(change.new)
+        if script_path:
+            args = load_args(script_path)
+            fields = []
+            for arg, default in args.items():
+                field = widgets.Text(value=str(default), description=f"{arg}:")
+                fields.append(field)
+            args_box.children = fields
+    
+    # Obsługa przycisku uruchamiania
+    def on_run_button_click(b):
+        with output_box:
+            clear_output()
+            selected_script = script_dropdown.value
+            if not selected_script:
+                print("Nie wybrano skryptu.")
+                return
+            
+            script_path = scripts.get(selected_script)
+            if not script_path:
+                print("Nie znaleziono ścieżki do skryptu.")
+                return
+            
+            # Zbieranie argumentów
+            args = {}
+            for field in args_box.children:
+                args[field.description[:-1]] = field.value
+            
+            print(f"Uruchamianie skryptu {selected_script} z argumentami: {args}")
+            stdout, stderr = run_script(script_path, args)
+            print("=== OUTPUT ===")
+            print(stdout)
+            print("=== ERROR ===")
+            print(stderr)
+    
+    # Powiązanie zdarzeń
+    script_dropdown.observe(on_script_change, names="value")
+    run_button.on_click(on_run_button_click)
+    
+    # Wyświetlanie interfejsu
+    display(widgets.VBox([script_dropdown, args_box, run_button, output_box]))
 
-command_input = widgets.Text(description="Komenda:")
-comment_input = widgets.Text(description="Komentarz:")
-time_input = widgets.Text(description="Czas:")
-add_button = widgets.Button(description="Dodaj Zadanie")
-load_jobs_button = widgets.Button(description="Odśwież")
-job_selector = widgets.Dropdown(description="Wybierz zadanie:")
-
-add_button.on_click(lambda b: add_cron_job())
-load_jobs_button.on_click(lambda b: load_cron_jobs())
-
-def add_cron_job():
-    job = cron.new(command=command_input.value, comment=comment_input.value)
-    job.setall(time_input.value)
-    cron.write()
-    load_cron_jobs()
-    with output_scheduler:
-        clear_output()
-        print("Dodano nowe zadanie do crontaba.")
-
-def load_cron_jobs():
-    jobs = [(job.comment, job) for job in cron]
-    job_selector.options = jobs if jobs else ["Brak zadań"]
-
-load_cron_jobs()
-scheduler_tab = widgets.VBox([command_input, comment_input, time_input, add_button, load_jobs_button, job_selector, output_scheduler])
-
-# -------------------- ZAKŁADKA PASSWORDS --------------------
-systems = ["System1", "System2", "System3"]
-selected_system = widgets.Dropdown(options=systems, description="System:")
-password_input = widgets.Password(description="Hasło:")
-create_button = widgets.Button(description="Utwórz")
-output_passwords = widgets.Output()
-
-def create_password_file(button):
-    system = selected_system.value
-    password = password_input.value
-    os.makedirs("pwd", exist_ok=True)
-    with open(f"pwd/{system}.txt", "w") as file:
-        file.write(password)
-    with output_passwords:
-        clear_output()
-        print(f"Hasło zapisane dla {system}.")
-
-create_button.on_click(create_password_file)
-passwords_tab = widgets.VBox([selected_system, password_input, create_button, output_passwords])
-
-# -------------------- ZAKŁADKA RUN ARGS --------------------
-processes_with_args = {
-    'Kod1': '/path/to/code1.py',
-    'Kod2': '/path/to/code2.py',
-    'Kod3': '/path/to/code3.py',
-}
-output_run_args = widgets.Output()
-selected_process = widgets.Dropdown(options=processes_with_args.keys(), description="Proces:")
-arguments_box = widgets.VBox()
-run_args_button = widgets.Button(description="Uruchom z argumentami")
-
-
-def load_args(button):
-    script_path = processes_with_args[selected_process.value]
-    parser = argparse.ArgumentParser()
-    with open(script_path, "r") as f:
-        code = compile(f.read(), script_path, "exec")
-        exec(code)
-    args = parser.parse_args([])
-
-    widgets_args = []
-    for arg, value in vars(args).items():
-        widgets_args.append(widgets.Text(value=str(value), description=arg))
-    arguments_box.children = widgets_args
-
-run_args_button.on_click(load_args)
-run_args_tab = widgets.VBox([selected_process, arguments_box, run_args_button, output_run_args])
-
-# -------------------- ZAKŁADKA UPDATE --------------------
-repo_path = '/path/to/repo'
-update_output = widgets.Output()
-update_button = widgets.Button(description="Sprawdź", button_style="success")
-
-
-def check_update(button):
-    repo = Repo(repo_path)
-    origin = repo.remote(name='origin')
-    origin.fetch()
-
-    if repo.head.commit != origin.refs.master.commit:
-        button.button_style = 'warning'
-        button.description = 'Update!'
-    else:
-        button.button_style = 'success'
-        button.description = 'Aktualne'
-
-update_button.on_click(check_update)
-update_tab = widgets.VBox([update_button, update_output])
-
-# -------------------- TWORZENIE MENU --------------------
-tabs = widgets.Tab()
-tabs.children = [run_tab, scheduler_tab, passwords_tab, run_args_tab, update_tab]
-tabs.set_title(0, "RUN")
-tabs.set_title(1, "TaskScheduler")
-tabs.set_title(2, "Passwords")
-tabs.set_title(3, "RUN args")
-tabs.set_title(4, "UPDATE")
-
-display(tabs)
+# Uruchomienie interfejsu
+create_interface()
