@@ -4,7 +4,6 @@ import importlib.util
 import sys
 import subprocess
 import argparse
-import os
 
 # Ścieżki do skryptów
 scripts = {
@@ -45,8 +44,8 @@ def run_script(script_path, args):
     except Exception as e:
         return "", str(e)
 
-# Interfejs z ipywidgets
-def create_interface():
+# Funkcja do tworzenia interfejsu jako zakładki
+def create_script_tab():
     # Dropdown do wyboru skryptu
     script_dropdown = widgets.Dropdown(
         options=[""] + list(scripts.keys()),
@@ -97,13 +96,6 @@ def create_interface():
                 args[field.description[:-1]] = field.value
             
             print(f"Uruchamianie skryptu {selected_script} z argumentami: {args}")
-            
-            # Sprawdzenie, czy skrypt zawiera funkcję if __name__ == '__main__':
-            with open(script_path, "r") as f:
-                script_content = f.read()
-                if "__name__ == '__main__'" in script_content:
-                    exec(script_content)  # Uruchomienie kodu w kontekście skryptu
-            
             stdout, stderr = run_script(script_path, args)
             print("=== OUTPUT ===")
             print(stdout)
@@ -114,11 +106,17 @@ def create_interface():
     script_dropdown.observe(on_script_change, names="value")
     run_button.on_click(on_run_button_click)
     
-    # Wyświetlanie interfejsu w formie tab
-    tab = widgets.Tab()
-    tab.children = [widgets.VBox([script_dropdown, args_box, run_button, output_box])]
-    tab.set_title(0, "Skrypt")
-    display(tab)
+    # Zwrócenie widgetu (zamiast wywoływania)
+    return widgets.VBox([script_dropdown, args_box, run_button, output_box])
 
-# Uruchomienie interfejsu
-create_interface()
+# Przykładowe użycie w Tabie
+tab = widgets.Tab()
+
+# Tworzenie zakładki skryptu
+script_tab = create_script_tab()
+
+# Dodanie zakładki do Tabu
+tab.children = [script_tab]  # Możesz dodać więcej zakładek
+tab.set_title(0, "Skrypt")   # Tytuł zakładki
+
+display(tab)
