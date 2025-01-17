@@ -3,6 +3,7 @@ import os
 import ipywidgets as widgets
 from IPython.display import display
 
+
 # Funkcja sprawdzająca, czy repozytorium jest aktualne
 def check_repo_status():
     try:
@@ -18,19 +19,33 @@ def check_repo_status():
         print("Brak repozytorium Git w tym katalogu.")
         return 'error'
 
+
 # Funkcja inicjująca submoduł
 def init_submodule():
     try:
         repo = git.Repo(search_parent_directories=True)
-        # Sprawdzenie, czy repozytorium A jest już submodułem
-        if 'modules/RepozytoriumA' not in repo.submodules:
-            repo.submodule_add('https://bitbucket.org/user/RepozytoriumA.git', 'modules/RepozytoriumA')
-            repo.submodule_update(init=True)
-            print("RepozytoriumA dodane jako submoduł.")
+        submodule_path = os.path.join(repo.working_dir, 'modules/RepozytoriumA')
+        
+        # Sprawdzenie, czy submoduł już istnieje
+        if not os.path.exists(submodule_path):
+            repo.git.execute([
+                'git', 'submodule', 'add',
+                'https://bitbucket.org/user/RepozytoriumA.git',
+                'modules/RepozytoriumA'
+            ])
+            repo.git.execute(['git', 'submodule', 'update', '--init', '--recursive'])
+
+            # Ustawienie sparse-checkout na pusty stan
+            set_sparse_checkout([])
+            print("RepozytoriumA dodane jako submoduł z pustym sparse-checkout.")
         else:
             print("RepozytoriumA jest już submodułem.")
+        
+        # Aktualizacja checkboxów na podstawie sparsowanych katalogów
+        update_checkboxes()
     except git.exc.InvalidGitRepositoryError:
         print("Brak repozytorium Git w tym katalogu.")
+
 
 # Funkcja aktualizująca submoduł
 def update_submodule():
@@ -42,25 +57,48 @@ def update_submodule():
     except git.exc.InvalidGitRepositoryError:
         print("Brak repozytorium Git w tym katalogu.")
 
-# Funkcja do sparsowania folderów w submodule
-def sparse_checkout(selected_folders):
+
+# Funkcja do ustawienia sparse-checkout
+def set_sparse_checkout(folders):
     try:
         repo = git.Repo(search_parent_directories=True)
         submodule = repo.submodules['RepozytoriumA']
         submodule_repo = submodule.module()
 
-        # Ustawienie sparse-checkout w repo submodułu
+        # Ustawienie sparse-checkout
         submodule_repo.git.config('core.sparseCheckout', 'true')
-
-        # Wykonanie komendy sparse-checkout
-        for folder in selected_folders:
-            submodule_repo.git.execute(['git', 'sparse-checkout', 'set', folder])
+        submodule_repo.git.execute(['git', 'sparse-checkout', 'set', *folders])
 
         submodule_repo.git.checkout('master')  # Przełączamy się na mastera
         submodule_repo.git.pull()  # Pobieramy zmiany
-        print(f"Submoduł sparsowany z folderami: {', '.join(selected_folders)}")
+        print(f"Sparse-checkout ustawiony dla katalogów: {', '.join(folders)}")
     except git.exc.InvalidGitRepositoryError:
         print("Brak repozytorium Git w tym katalogu.")
+
+
+# Funkcja odczytująca sparsowane katalogi
+def get_sparse_checkout_folders():
+    try:
+        repo = git.Repo(search_parent_directories=True)
+        submodule = repo.submodules['RepozytoriumA']
+        submodule_repo = submodule.module()
+
+        # Pobieranie sparsowanych katalogów
+        sparse_folders = submodule_repo.git.execute(['git', 'sparse-checkout', 'list']).splitlines()
+        return [folder.strip() for folder in sparse_folders]
+    except git.exc.InvalidGitRepositoryError:
+        print("Brak repozytorium Git w tym katalogu.")
+        return []
+
+
+# Funkcja aktualizująca checkboxy na podstawie sparsowanych katalogów
+def update_checkboxes():
+    sparse_folders = get_sparse_checkout_folders()
+
+    folder_x.value = 'X' in sparse_folders
+    folder_y.value = 'Y' in sparse_folders
+    folder_z.value = 'Z' in sparse_folders
+
 
 # Interfejs użytkownika
 menu_button = widgets.Button(description="Zainicjuj RepozytoriumA", disabled=False)
@@ -91,7 +129,7 @@ def on_folder_change(change):
         selected_folders.append('Y')
     if folder_z.value:
         selected_folders.append('Z')
-    sparse_checkout(selected_folders)
+    set_sparse_checkout(selected_folders)
 
 menu_button.on_click(on_init_button_click)
 update_button.on_click(on_update_button_click)
@@ -101,3 +139,6 @@ folder_z.observe(on_folder_change, names='value')
 
 # Wyświetlenie UI
 display(menu_button, update_button, folder_x, folder_y, folder_z)
+
+# Aktualizacja checkboxów na starcie
+update_checkboxes()
