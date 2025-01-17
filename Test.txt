@@ -1,122 +1,103 @@
+import git
+import os
 import ipywidgets as widgets
-from IPython.display import display, clear_output
-import importlib.util
-import sys
-import subprocess
-import argparse
+from IPython.display import display
 
-# Ścieżki do skryptów
-scripts = {
-    "kod1": "/path/to/kod1.py",
-    "kod2": "/path/to/kod2.py"
-}
-
-# Funkcja do ładowania argumentów
-def load_args(script_path):
-    args = {}
+# Funkcja sprawdzająca, czy repozytorium jest aktualne
+def check_repo_status():
     try:
-        # Importowanie skryptu jako modułu
-        spec = importlib.util.spec_from_file_location("module.name", script_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["module.name"] = module
-        spec.loader.exec_module(module)
+        repo = git.Repo(search_parent_directories=True)
+        origin = repo.remotes.origin
+        origin.fetch()  # Pobranie aktualnych danych z repo
+        status = repo.git.status('-uno')  # Sprawdzenie statusu repo
+        if 'up to date' in status:
+            return 'up_to_date'
+        else:
+            return 'update_available'
+    except git.exc.InvalidGitRepositoryError:
+        print("Brak repozytorium Git w tym katalogu.")
+        return 'error'
 
-        # Sprawdzenie, czy parser istnieje globalnie
-        if hasattr(module, "parser") and isinstance(module.parser, argparse.ArgumentParser):
-            parser = module.parser
-            for action in parser._actions:
-                if action.dest != "help":  # Pomijamy akcję pomocy
-                    args[action.dest] = action.default
-    except Exception as e:
-        print(f"Błąd podczas wczytywania argumentów: {e}")
-    return args
-
-# Funkcja do uruchamiania skryptu
-def run_script(script_path, args):
-    cmd = ["python3", script_path]
-    for key, value in args.items():
-        cmd.append(f"--{key}")
-        cmd.append(str(value))
-    
+# Funkcja inicjująca submoduł
+def init_submodule():
     try:
-        result = subprocess.run(cmd, text=True, capture_output=True)
-        return result.stdout, result.stderr
-    except Exception as e:
-        return "", str(e)
+        repo = git.Repo(search_parent_directories=True)
+        # Sprawdzenie, czy repozytorium A jest już submodułem
+        if 'modules/RepozytoriumA' not in repo.submodules:
+            repo.submodule_add('https://bitbucket.org/user/RepozytoriumA.git', 'modules/RepozytoriumA')
+            repo.submodule_update(init=True)
+            print("RepozytoriumA dodane jako submoduł.")
+        else:
+            print("RepozytoriumA jest już submodułem.")
+    except git.exc.InvalidGitRepositoryError:
+        print("Brak repozytorium Git w tym katalogu.")
 
-# Funkcja do tworzenia interfejsu jako zakładki
-def create_script_tab():
-    # Dropdown do wyboru skryptu
-    script_dropdown = widgets.Dropdown(
-        options=[""] + list(scripts.keys()),
-        description="Skrypt:"
-    )
+# Funkcja aktualizująca submoduł
+def update_submodule():
+    try:
+        repo = git.Repo(search_parent_directories=True)
+        submodule = repo.submodules['RepozytoriumA']
+        submodule.update(init=True, recursive=True)
+        print("Submoduł zaktualizowany.")
+    except git.exc.InvalidGitRepositoryError:
+        print("Brak repozytorium Git w tym katalogu.")
 
-    # Kontener na dynamiczne pola argumentów
-    args_box = widgets.VBox()
-    
-    # Przycisk do uruchamiania skryptu
-    run_button = widgets.Button(description="Uruchom")
-    
-    # Pole do wyświetlania wyników
-    output_box = widgets.Output()
-    
-    # Obsługa zmiany wyboru skryptu
-    def on_script_change(change):
-        if not change.new:
-            args_box.children = []
-            return
-        
-        script_path = scripts.get(change.new)
-        if script_path:
-            args = load_args(script_path)
-            fields = []
-            for arg, default in args.items():
-                field = widgets.Text(value=str(default), description=f"{arg}:")
-                fields.append(field)
-            args_box.children = fields
-    
-    # Obsługa przycisku uruchamiania
-    def on_run_button_click(b):
-        with output_box:
-            clear_output()
-            selected_script = script_dropdown.value
-            if not selected_script:
-                print("Nie wybrano skryptu.")
-                return
-            
-            script_path = scripts.get(selected_script)
-            if not script_path:
-                print("Nie znaleziono ścieżki do skryptu.")
-                return
-            
-            # Zbieranie argumentów
-            args = {}
-            for field in args_box.children:
-                args[field.description[:-1]] = field.value
-            
-            print(f"Uruchamianie skryptu {selected_script} z argumentami: {args}")
-            stdout, stderr = run_script(script_path, args)
-            print("=== OUTPUT ===")
-            print(stdout)
-            print("=== ERROR ===")
-            print(stderr)
-    
-    # Powiązanie zdarzeń
-    script_dropdown.observe(on_script_change, names="value")
-    run_button.on_click(on_run_button_click)
-    
-    # Zwrócenie widgetu (zamiast wywoływania)
-    return widgets.VBox([script_dropdown, args_box, run_button, output_box])
+# Funkcja do sparsowania folderów w submodule
+def sparse_checkout(selected_folders):
+    try:
+        repo = git.Repo(search_parent_directories=True)
+        submodule = repo.submodules['RepozytoriumA']
+        submodule_repo = submodule.module()
 
-# Przykładowe użycie w Tabie
-tab = widgets.Tab()
+        # Ustawienie sparse-checkout w repo submodułu
+        submodule_repo.git.config('core.sparseCheckout', 'true')
 
-# Tworzenie zakładki skryptu
-script_tab = create_script_tab()
+        # Wykonanie komendy sparse-checkout
+        for folder in selected_folders:
+            submodule_repo.git.execute(['git', 'sparse-checkout', 'set', folder])
 
-# Dodanie zakładki do Tabu
-tab.children = [script_tab]  # Możesz dodać więcej zakładek
-tab.set_title(0, "Skrypt")   # Tytuł zakładki
+        submodule_repo.git.checkout('master')  # Przełączamy się na mastera
+        submodule_repo.git.pull()  # Pobieramy zmiany
+        print(f"Submoduł sparsowany z folderami: {', '.join(selected_folders)}")
+    except git.exc.InvalidGitRepositoryError:
+        print("Brak repozytorium Git w tym katalogu.")
 
-display(tab)
+# Interfejs użytkownika
+menu_button = widgets.Button(description="Zainicjuj RepozytoriumA", disabled=False)
+update_button = widgets.Button(description="Sprawdź aktualność", disabled=False)
+
+folder_x = widgets.Checkbox(value=False, description="X")
+folder_y = widgets.Checkbox(value=False, description="Y")
+folder_z = widgets.Checkbox(value=False, description="Z")
+
+def on_init_button_click(b):
+    init_submodule()
+
+def on_update_button_click(b):
+    status = check_repo_status()
+    if status == 'up_to_date':
+        update_button.style.button_color = 'lightgreen'
+        update_button.description = "UP TO DATE"
+    elif status == 'update_available':
+        update_button.style.button_color = 'yellow'
+        update_button.description = "UPDATE"
+        update_submodule()
+
+def on_folder_change(change):
+    selected_folders = []
+    if folder_x.value:
+        selected_folders.append('X')
+    if folder_y.value:
+        selected_folders.append('Y')
+    if folder_z.value:
+        selected_folders.append('Z')
+    sparse_checkout(selected_folders)
+
+menu_button.on_click(on_init_button_click)
+update_button.on_click(on_update_button_click)
+folder_x.observe(on_folder_change, names='value')
+folder_y.observe(on_folder_change, names='value')
+folder_z.observe(on_folder_change, names='value')
+
+# Wyświetlenie UI
+display(menu_button, update_button, folder_x, folder_y, folder_z)
