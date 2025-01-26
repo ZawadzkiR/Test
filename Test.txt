@@ -67,26 +67,57 @@ def get_library_versions(libraries):
     return lib_with_versions
 
 # Konfiguracja
-folder_path = "."  # Zmień na swoją ścieżkę
+folder_path = "/ścieżka/do/folderu"  # Zmień na swoją ścieżkę
 include_versions = True  # Jeśli True, dodaje wersje bibliotek
+include_versions_artifactory = True  # Dodawanie wersji w sekcji Artifactory
+
+# Lista bibliotek z Artifactory
+artifactory_libraries = [
+    "pandas",
+    "my-artifactory-lib1",
+    "my-artifactory-lib2"
+]
+
+# URL do repozytorium Artifactory
+artifactory_url = "https://artifactory.example.com/simple"
 
 # Znajdowanie bibliotek
 libraries = find_imports_in_folder(folder_path)
 
-# Pobieranie wersji bibliotek (jeśli ustawiono include_versions na True)
-if include_versions:
-    libraries_with_versions = get_library_versions(libraries)
+# Oddzielanie bibliotek Artifactory
+libraries_to_add = libraries - set(artifactory_libraries)
+libraries_in_artifactory = libraries & set(artifactory_libraries)
 
-# Zapisywanie wyników do requirements.txt
+# Pobieranie wersji bibliotek
+if include_versions:
+    libraries_with_versions = get_library_versions(libraries_to_add)
+if include_versions_artifactory:
+    artifactory_with_versions = get_library_versions(libraries_in_artifactory)
+
+# Tworzenie pliku requirements.txt
 with open("requirements.txt", "w") as f:
-    for library in sorted(libraries):
+    # Zapis bibliotek spoza Artifactory
+    for library in sorted(libraries_to_add):
         if include_versions:
             version = libraries_with_versions.get(library)
             if version:
                 f.write(f"{library}=={version}\n")
             else:
-                f.write(f"{library}\n")  # Brak wersji, jeśli biblioteka nie jest zainstalowana
+                f.write(f"{library}\n")
         else:
             f.write(f"{library}\n")
+
+    # Dodawanie sekcji Artifactory
+    if artifactory_libraries:
+        f.write("\n--extra-index-url " + artifactory_url + "\n")
+        for library in sorted(libraries_in_artifactory):
+            if include_versions_artifactory:
+                version = artifactory_with_versions.get(library)
+                if version:
+                    f.write(f"{library}=={version}\n")
+                else:
+                    f.write(f"{library}\n")
+            else:
+                f.write(f"{library}\n")
 
 print("Plik requirements.txt został wygenerowany.")
