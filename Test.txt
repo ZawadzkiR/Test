@@ -1,143 +1,92 @@
-import git
 import os
-import ipywidgets as widgets
-from IPython.display import display
+import ast
+import nbformat
+from pkg_resources import get_distribution, DistributionNotFound
 
-
-# Funkcja inicjalizująca zdalne repozytorium
-def init_remote_repo(repo_name, repo_url, repo_path):
-    if not os.path.exists(repo_path):
-        print(f"Inicjalizowanie {repo_name}...")
-        git.Repo.clone_from(repo_url, repo_path)
-        repo = git.Repo(repo_path)
-        repo.git.checkout('master')  # Zmiana branch na master
-        set_sparse_checkout(repo, [])  # Pusty sparse-checkout
-        print(f"Repozytorium {repo_name} zostało zainicjalizowane.")
-    else:
-        print(f"Repozytorium {repo_name} już istnieje.")
-
-
-# Funkcja ustawiająca sparse-checkout
-def set_sparse_checkout(repo, folders):
-    repo.git.config('core.sparseCheckout', 'true')
-    repo.git.execute(['git', 'sparse-checkout', 'set', *folders])
-    repo.git.checkout('master')  # Przełączamy się na mastera
-    repo.git.pull()
-    print(f"Sparse-checkout ustawiony dla katalogów: {', '.join(folders)}")
-
-
-# Funkcja odczytująca sparsowane katalogi
-def get_sparse_checkout_folders(repo):
+def find_imports_in_py(file_path):
+    """Funkcja do znajdowania importów w plikach .py."""
+    imports = set()
     try:
-        sparse_folders = repo.git.execute(['git', 'sparse-checkout', 'list']).splitlines()
-        return [folder.strip() for folder in sparse_folders]
+        with open(file_path, "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        imports.add(alias.name.split('.')[0])
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        imports.add(node.module.split('.')[0])
     except Exception as e:
-        print(f"Błąd odczytu sparse-checkout: {e}")
-        return []
+        print(f"Błąd podczas przetwarzania pliku {file_path}: {e}")
+    return imports
 
-
-# Funkcja aktualizująca checkboxy
-def update_checkboxes(repo, checkboxes):
-    sparse_folders = get_sparse_checkout_folders(repo)
-    for folder, checkbox in checkboxes.items():
-        checkbox.value = folder in sparse_folders
-
-
-# Funkcja do sprawdzania aktualizacji
-def check_repo_status(repo):
-    repo.remotes.origin.fetch()
-    if repo.git.status('-uno').find("up to date") != -1:
-        return "up_to_date"
-    else:
-        return "update_available"
-
-
-# Funkcja zmiany brancha
-def change_branch(repo, branch_name):
+def find_imports_in_ipynb(file_path):
+    """Funkcja do znajdowania importów w plikach .ipynb."""
+    imports = set()
     try:
-        repo.git.checkout(branch_name)
-        repo.git.pull()
-        print(f"Przełączono na branch: {branch_name}")
+        with open(file_path, "r", encoding="utf-8") as f:
+            notebook = nbformat.read(f, as_version=4)
+            for cell in notebook.get("cells", []):
+                if cell["cell_type"] == "code":
+                    try:
+                        tree = ast.parse(cell["source"])
+                        for node in ast.walk(tree):
+                            if isinstance(node, ast.Import):
+                                for alias in node.names:
+                                    imports.add(alias.name.split('.')[0])
+                            elif isinstance(node, ast.ImportFrom):
+                                if node.module:
+                                    imports.add(node.module.split('.')[0])
+                    except SyntaxError:
+                        print(f"Błąd składni w komórce kodu w pliku: {file_path}")
     except Exception as e:
-        print(f"Błąd zmiany brancha: {e}")
+        print(f"Błąd podczas przetwarzania pliku {file_path}: {e}")
+    return imports
 
+def find_imports_in_folder(folder_path):
+    """Funkcja do przeszukiwania folderu w poszukiwaniu importów w plikach .py i .ipynb."""
+    all_imports = set()
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            file_path = os.path.join(root, file)
+            if file.endswith(".py"):
+                all_imports.update(find_imports_in_py(file_path))
+            elif file.endswith(".ipynb"):
+                all_imports.update(find_imports_in_ipynb(file_path))
+    return all_imports
 
-# Tworzenie zakładek dla każdego repozytorium
-def create_repo_tab(repo_name, repo_url, repo_path):
-    # Przyciski i checkboxy
-    init_button = widgets.Button(description=f"Inicjalizuj {repo_name}")
-    update_button = widgets.Button(description="Sprawdź aktualność", style={'button_color': 'lightblue'})
-    branch_dropdown = widgets.Dropdown(description="Branch:", options=[], value=None)
+def get_library_versions(libraries):
+    """Pobiera wersje bibliotek zainstalowanych w środowisku."""
+    lib_with_versions = {}
+    for library in libraries:
+        try:
+            version = get_distribution(library).version
+            lib_with_versions[library] = version
+        except DistributionNotFound:
+            lib_with_versions[library] = None  # Biblioteka nie jest zainstalowana
+    return lib_with_versions
 
-    folder_checkboxes = {
-        'X': widgets.Checkbox(value=False, description="X"),
-        'Y': widgets.Checkbox(value=False, description="Y"),
-        'Z': widgets.Checkbox(value=False, description="Z"),
-    }
+# Konfiguracja
+folder_path = "."  # Zmień na swoją ścieżkę
+include_versions = True  # Jeśli True, dodaje wersje bibliotek
 
-    # Inicjalizacja repozytorium
-    def on_init_button_click(b):
-        init_remote_repo(repo_name, repo_url, repo_path)
-        repo = git.Repo(repo_path)
-        branch_dropdown.options = [head.name for head in repo.heads]
-        update_checkboxes(repo, folder_checkboxes)
+# Znajdowanie bibliotek
+libraries = find_imports_in_folder(folder_path)
 
-    # Sprawdzanie aktualności repozytorium
-    def on_update_button_click(b):
-        if os.path.exists(repo_path):
-            repo = git.Repo(repo_path)
-            status = check_repo_status(repo)
-            if status == "up_to_date":
-                update_button.style.button_color = 'lightgreen'
-                update_button.description = "UP TO DATE"
+# Pobieranie wersji bibliotek (jeśli ustawiono include_versions na True)
+if include_versions:
+    libraries_with_versions = get_library_versions(libraries)
+
+# Zapisywanie wyników do requirements.txt
+with open("requirements.txt", "w") as f:
+    for library in sorted(libraries):
+        if include_versions:
+            version = libraries_with_versions.get(library)
+            if version:
+                f.write(f"{library}=={version}\n")
             else:
-                update_button.style.button_color = 'yellow'
-                update_button.description = "UPDATE"
-                repo.remotes.origin.pull()
+                f.write(f"{library}\n")  # Brak wersji, jeśli biblioteka nie jest zainstalowana
+        else:
+            f.write(f"{library}\n")
 
-    # Zmiana branchy
-    def on_branch_dropdown_change(change):
-        if os.path.exists(repo_path):
-            repo = git.Repo(repo_path)
-            change_branch(repo, branch_dropdown.value)
-
-    # Obsługa sparse-checkout
-    def on_folder_change(change):
-        if os.path.exists(repo_path):
-            repo = git.Repo(repo_path)
-            selected_folders = [folder for folder, checkbox in folder_checkboxes.items() if checkbox.value]
-            set_sparse_checkout(repo, selected_folders)
-
-    # Eventy
-    init_button.on_click(on_init_button_click)
-    update_button.on_click(on_update_button_click)
-    branch_dropdown.observe(on_branch_dropdown_change, names='value')
-    for checkbox in folder_checkboxes.values():
-        checkbox.observe(on_folder_change, names='value')
-
-    # Layout zakładki
-    return widgets.VBox([
-        init_button,
-        update_button,
-        branch_dropdown,
-        widgets.HBox(list(folder_checkboxes.values())),
-    ])
-
-
-# Ścieżki i URL repozytoriów
-repo_a_url = 'https://bitbucket.org/user/RepozytoriumA.git'
-repo_a_path = os.path.join('modules', 'RepozytoriumA')
-
-repo_b_url = 'https://bitbucket.org/user/RepozytoriumB.git'
-repo_b_path = os.path.join('modules', 'RepozytoriumB')
-
-# Tworzenie zakładek
-tab_a = create_repo_tab("RepozytoriumA", repo_a_url, repo_a_path)
-tab_b = create_repo_tab("RepozytoriumB", repo_b_url, repo_b_path)
-
-tabs = widgets.Tab(children=[tab_a, tab_b])
-tabs.set_title(0, "RepozytoriumA")
-tabs.set_title(1, "RepozytoriumB")
-
-# Wyświetlenie zakładek
-display(tabs)
+print("Plik requirements.txt został wygenerowany.")
