@@ -1,123 +1,133 @@
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+import importlib.util
+import sys
+import subprocess
+import argparse
 import os
-import ast
-import nbformat
-from pkg_resources import get_distribution, DistributionNotFound
 
-def find_imports_in_py(file_path):
-    """Funkcja do znajdowania importów w plikach .py."""
-    imports = set()
+# Ścieżki do skryptów
+scripts = {
+    "kod1": "/path/to/kod1.py",
+    "kod2": "/path/to/kod2.py"
+}
+
+# Funkcja do ładowania argumentów
+def load_args(script_path):
+    args = {}
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            tree = ast.parse(f.read())
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        imports.add(alias.name.split('.')[0])
-                elif isinstance(node, ast.ImportFrom):
-                    if node.module:
-                        imports.add(node.module.split('.')[0])
-    except Exception as e:
-        print(f"Błąd podczas przetwarzania pliku {file_path}: {e}")
-    return imports
+        # Importowanie skryptu jako modułu
+        spec = importlib.util.spec_from_file_location("module.name", script_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["module.name"] = module
+        spec.loader.exec_module(module)
 
-def find_imports_in_ipynb(file_path):
-    """Funkcja do znajdowania importów w plikach .ipynb."""
-    imports = set()
+        # Sprawdzenie, czy parser istnieje globalnie
+        if hasattr(module, "parser") and isinstance(module.parser, argparse.ArgumentParser):
+            parser = module.parser
+            for action in parser._actions:
+                if action.dest != "help":  # Pomijamy akcję pomocy
+                    args[action.dest] = action.default
+    except Exception as e:
+        print(f"Błąd podczas wczytywania argumentów: {e}")
+    return args
+
+# Funkcja do uruchamiania skryptu
+def run_script(script_path, args, output_box):
+    cmd = ["python3", script_path]
+    for key, value in args.items():
+        cmd.append(f"--{key}")
+        cmd.append(str(value))
+    
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            notebook = nbformat.read(f, as_version=4)
-            for cell in notebook.get("cells", []):
-                if cell["cell_type"] == "code":
-                    try:
-                        tree = ast.parse(cell["source"])
-                        for node in ast.walk(tree):
-                            if isinstance(node, ast.Import):
-                                for alias in node.names:
-                                    imports.add(alias.name.split('.')[0])
-                            elif isinstance(node, ast.ImportFrom):
-                                if node.module:
-                                    imports.add(node.module.split('.')[0])
-                    except SyntaxError:
-                        print(f"Błąd składni w komórce kodu w pliku: {file_path}")
+        with output_box:
+            clear_output()
+            print(f"Uruchamianie skryptu: {os.path.basename(script_path)}")
+            print(f"Argumenty: {args}")
+            print("\n=== WYNIK ===")
+            
+            # Ustawienie środowiska Jupyter do wyświetlania
+            subprocess.run(cmd, text=True, capture_output=False, check=True)
+    except subprocess.CalledProcessError as e:
+        with output_box:
+            print("\n=== BŁĄD ===")
+            print(e.stderr)
     except Exception as e:
-        print(f"Błąd podczas przetwarzania pliku {file_path}: {e}")
-    return imports
+        with output_box:
+            print("\n=== WYJĄTEK ===")
+            print(str(e))
 
-def find_imports_in_folder(folder_path):
-    """Funkcja do przeszukiwania folderu w poszukiwaniu importów w plikach .py i .ipynb."""
-    all_imports = set()
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            file_path = os.path.join(root, file)
-            if file.endswith(".py"):
-                all_imports.update(find_imports_in_py(file_path))
-            elif file.endswith(".ipynb"):
-                all_imports.update(find_imports_in_ipynb(file_path))
-    return all_imports
+# Funkcja do tworzenia interfejsu jako zakładki
+def create_script_tab():
+    # Dropdown do wyboru skryptu
+    script_dropdown = widgets.Dropdown(
+        options=[""] + list(scripts.keys()),
+        description="Skrypt:"
+    )
 
-def get_library_versions(libraries):
-    """Pobiera wersje bibliotek zainstalowanych w środowisku."""
-    lib_with_versions = {}
-    for library in libraries:
-        try:
-            version = get_distribution(library).version
-            lib_with_versions[library] = version
-        except DistributionNotFound:
-            lib_with_versions[library] = None  # Biblioteka nie jest zainstalowana
-    return lib_with_versions
+    # Kontener na dynamiczne pola argumentów
+    args_box = widgets.VBox()
+    
+    # Przycisk do uruchamiania skryptu
+    run_button = widgets.Button(description="Uruchom")
+    
+    # Pole do wyświetlania wyników
+    output_box = widgets.Output()
+    
+    # Obsługa zmiany wyboru skryptu
+    def on_script_change(change):
+        if not change.new:
+            args_box.children = []
+            return
+        
+        script_path = scripts.get(change.new)
+        if script_path:
+            args = load_args(script_path)
+            fields = []
+            for arg, default in args.items():
+                field = widgets.Text(value=str(default), description=f"{arg}:")
+                fields.append(field)
+            args_box.children = fields
+    
+    # Obsługa przycisku uruchamiania
+    def on_run_button_click(b):
+        selected_script = script_dropdown.value
+        if not selected_script:
+            with output_box:
+                clear_output()
+                print("Nie wybrano skryptu.")
+            return
+        
+        script_path = scripts.get(selected_script)
+        if not script_path:
+            with output_box:
+                clear_output()
+                print("Nie znaleziono ścieżki do skryptu.")
+            return
+        
+        # Zbieranie argumentów
+        args = {}
+        for field in args_box.children:
+            args[field.description[:-1]] = field.value
+        
+        # Uruchamianie skryptu i wyświetlanie wyników
+        run_script(script_path, args, output_box)
+    
+    # Powiązanie zdarzeń
+    script_dropdown.observe(on_script_change, names="value")
+    run_button.on_click(on_run_button_click)
+    
+    # Zwrócenie widgetu
+    return widgets.VBox([script_dropdown, args_box, run_button, output_box])
 
-# Konfiguracja
-folder_path = "/ścieżka/do/folderu"  # Zmień na swoją ścieżkę
-include_versions = True  # Jeśli True, dodaje wersje bibliotek
-include_versions_artifactory = True  # Dodawanie wersji w sekcji Artifactory
+# Przykładowe użycie w Tabie
+tab = widgets.Tab()
 
-# Lista bibliotek z Artifactory
-artifactory_libraries = [
-    "pandas",
-    "my-artifactory-lib1",
-    "my-artifactory-lib2"
-]
+# Tworzenie zakładki skryptu
+script_tab = create_script_tab()
 
-# URL do repozytorium Artifactory
-artifactory_url = "https://artifactory.example.com/simple"
+# Dodanie zakładki do Tabu
+tab.children = [script_tab]  # Możesz dodać więcej zakładek
+tab.set_title(0, "Skrypt")   # Tytuł zakładki
 
-# Znajdowanie bibliotek
-libraries = find_imports_in_folder(folder_path)
-
-# Oddzielanie bibliotek Artifactory
-libraries_to_add = libraries - set(artifactory_libraries)
-libraries_in_artifactory = libraries & set(artifactory_libraries)
-
-# Pobieranie wersji bibliotek
-if include_versions:
-    libraries_with_versions = get_library_versions(libraries_to_add)
-if include_versions_artifactory:
-    artifactory_with_versions = get_library_versions(libraries_in_artifactory)
-
-# Tworzenie pliku requirements.txt
-with open("requirements.txt", "w") as f:
-    # Zapis bibliotek spoza Artifactory
-    for library in sorted(libraries_to_add):
-        if include_versions:
-            version = libraries_with_versions.get(library)
-            if version:
-                f.write(f"{library}=={version}\n")
-            else:
-                f.write(f"{library}\n")
-        else:
-            f.write(f"{library}\n")
-
-    # Dodawanie sekcji Artifactory
-    if artifactory_libraries:
-        f.write("\n--extra-index-url " + artifactory_url + "\n")
-        for library in sorted(libraries_in_artifactory):
-            if include_versions_artifactory:
-                version = artifactory_with_versions.get(library)
-                if version:
-                    f.write(f"{library}=={version}\n")
-                else:
-                    f.write(f"{library}\n")
-            else:
-                f.write(f"{library}\n")
-
-print("Plik requirements.txt został wygenerowany.")
+display(tab)
