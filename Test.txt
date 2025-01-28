@@ -5,6 +5,7 @@ import sys
 import subprocess
 import argparse
 import os
+import traceback
 
 # Ścieżki do skryptów
 scripts = {
@@ -41,21 +42,37 @@ def run_script(script_path, args, output_box):
     
     try:
         with output_box:
-            clear_output()
+            clear_output()  # Czyszczenie outputu
             print(f"Uruchamianie skryptu: {os.path.basename(script_path)}")
             print(f"Argumenty: {args}")
-            print("\n=== WYNIK ===")
+            print("\n=== WYNIK ===\n")
             
-            # Ustawienie środowiska Jupyter do wyświetlania
-            subprocess.run(cmd, text=True, capture_output=False, check=True)
+            # Uruchamianie procesu i przekierowanie jego wyjścia na bieżąco
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+
+            # Odczyt na bieżąco
+            for line in iter(process.stdout.readline, ''):
+                print(line, end="")
+            
+            # Czekanie na zakończenie procesu
+            process.wait()
+            if process.returncode == 0:
+                print("\nProces zakończony pomyślnie!")
+            else:
+                raise subprocess.CalledProcessError(process.returncode, cmd, process.stderr.read())
+
     except subprocess.CalledProcessError as e:
         with output_box:
-            print("\n=== BŁĄD ===")
-            print(e.stderr)
+            print("\n=== BŁĄD ===\n")
+            print(f"Status zakończenia: {e.returncode}")
+            print(f"Polecenie: {e.cmd}")
+            print(e.output)
     except Exception as e:
         with output_box:
-            print("\n=== WYJĄTEK ===")
-            print(str(e))
+            print("\n=== WYJĄTEK ===\n")
+            traceback.print_exc()
 
 # Funkcja do tworzenia interfejsu jako zakładki
 def create_script_tab():
