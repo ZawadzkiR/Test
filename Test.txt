@@ -1,12 +1,15 @@
 import ipywidgets as widgets
-from IPython.display import display, clear_output
+from IPython.display import display, clear_output, Image
 import importlib.util
 import sys
 import subprocess
 import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
-from IPython.display import Image
+import warnings
+
+# Wyłączanie warningów
+warnings.filterwarnings("ignore")
 
 # Ścieżki do skryptów
 scripts = {
@@ -81,8 +84,13 @@ def create_script_tab():
     
     # Obsługa przycisku uruchamiania
     def on_run_button_click(b):
+        # Blokowanie przycisku i dropdowna
+        run_button.disabled = True
+        script_dropdown.disabled = True
+        
         with output_box:
-            clear_output()
+            clear_output(wait=True)  # Czyszczenie poprzednich wyników
+
             selected_script = script_dropdown.value
             if not selected_script:
                 print("Nie wybrano skryptu.")
@@ -101,25 +109,34 @@ def create_script_tab():
             print(f"Uruchamianie skryptu {selected_script} z argumentami: {args}")
             stdout, stderr = run_script(script_path, args)
             
-            # Wyświetlanie wyników
-            print("=== OUTPUT ===")
-            print(stdout)
-            print("=== ERROR ===")
-            print(stderr)
+            # Sprawdzanie i wyświetlanie wyników
+            if stdout:
+                print("=== OUTPUT ===")
+                print(stdout)
+                try:
+                    df = pd.read_json(stdout)
+                    display(df)  # Wyświetlanie DataFrame
+                except ValueError:
+                    pass  # Brak DataFrame w stdout
 
-            # Sprawdzanie, czy w stdout jest DataFrame
-            try:
-                df = pd.read_json(stdout)
-                display(df)  # Wyświetlanie DataFrame
-            except ValueError:
-                pass  # Brak DataFrame w stdout
+                # Sprawdzanie, czy w stdout jest wykres
+                if 'plt.show()' in stdout:
+                    plt.show()  # Wyświetlanie wykresu
+                elif 'Image' in stdout:
+                    image_path = stdout.split()[-1]  # Załóżmy, że ścieżka obrazu znajduje się w ostatnim elemencie stdout
+                    display(Image(filename=image_path))  # Wyświetlanie obrazu
+            
+            # Sprawdzanie błędów
+            if stderr:
+                print("=== ERROR ===")
+                print(stderr)
 
-            # Sprawdzanie, czy w stdout jest wykres
-            if 'plt.show()' in stdout:
-                plt.show()  # Wyświetlanie wykresu
-            elif 'Image' in stdout:
-                image_path = stdout.split()[-1]  # Załóżmy, że ścieżka obrazu znajduje się w ostatnim elemencie stdout
-                display(Image(filename=image_path))  # Wyświetlanie obrazu
+            # Informacja o sukcesie
+            print("Skrypt został pomyślnie wykonany.")
+        
+        # Odblokowanie przycisku i dropdowna
+        run_button.disabled = False
+        script_dropdown.disabled = False
 
     # Powiązanie zdarzeń
     script_dropdown.observe(on_script_change, names="value")
