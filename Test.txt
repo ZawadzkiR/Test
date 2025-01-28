@@ -1,5 +1,5 @@
 import ipywidgets as widgets
-from IPython.display import display, clear_output
+from IPython.display import display, clear_output, display
 import importlib.util
 import sys
 import subprocess
@@ -7,6 +7,7 @@ import argparse
 import warnings
 import io
 import contextlib
+import matplotlib.pyplot as plt
 
 # Wyłączanie warningów
 warnings.filterwarnings("ignore")
@@ -166,6 +167,13 @@ def create_script_tab():
                 # Informacja o sukcesie
                 if not isinstance(result, tuple) and result == "Kod uruchomiony pomyślnie bez argumentów.":
                     print(result)
+
+                # Wyświetlanie wykresów
+                if hasattr(module, 'generate_plots') and callable(getattr(module, 'generate_plots')):
+                    # Zakładamy, że skrypt ma funkcję 'generate_plots', która generuje wykresy
+                    fig = module.generate_plots()  # Załóżmy, że ta funkcja generuje wykres
+                    if fig:
+                        display(fig)
 
             except Exception as e:
                 print(f"Błąd: {e}")
