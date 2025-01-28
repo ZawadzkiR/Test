@@ -80,7 +80,7 @@ def create_script_tab():
     
     # Pole do wyświetlania wyników
     output_box = widgets.Output()
-    
+
     # Obsługa zmiany wyboru skryptu
     def on_script_change(change):
         if not change.new:
@@ -171,9 +171,11 @@ def create_script_tab():
                             display(Image(filename=image_path))  # Wyświetlanie obrazu
                     
                     # Sprawdzanie błędów
-                    if print_error:
+                    if stderr:
                         print("=== ERROR ===")
-                        print(print_error)
+                        print(stderr)
+                    else:
+                        print("Brak błędów.")
                 
                 # Informacja o sukcesie
                 if not isinstance(result, tuple) and result == "Kod uruchomiony pomyślnie bez argumentów.":
