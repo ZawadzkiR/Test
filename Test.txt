@@ -42,37 +42,35 @@ def run_script(script_path, args, output_box):
     
     try:
         with output_box:
-            clear_output()  # Czyszczenie outputu
+            clear_output()
             print(f"Uruchamianie skryptu: {os.path.basename(script_path)}")
             print(f"Argumenty: {args}")
-            print("\n=== WYNIK ===\n")
-            
-            # Uruchamianie procesu i przekierowanie jego wyjścia na bieżąco
+            print("\n=== WYNIK ===")
             process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                text=True
             )
-
-            # Odczyt na bieżąco
-            for line in iter(process.stdout.readline, ''):
-                print(line, end="")
             
-            # Czekanie na zakończenie procesu
-            process.wait()
-            if process.returncode == 0:
-                print("\nProces zakończony pomyślnie!")
-            else:
-                raise subprocess.CalledProcessError(process.returncode, cmd, process.stderr.read())
+            # Strumieniowe wypisywanie outputu na bieżąco
+            for line in process.stdout:
+                print(line, end="")
 
-    except subprocess.CalledProcessError as e:
-        with output_box:
-            print("\n=== BŁĄD ===\n")
-            print(f"Status zakończenia: {e.returncode}")
-            print(f"Polecenie: {e.cmd}")
-            print(e.output)
+            # Obsługa błędów i wypisanie całego stderr
+            _, stderr = process.communicate()
+            if process.returncode != 0:
+                print("\n=== BŁĄD ===")
+                print(stderr)
+                print("\nTraceback:")
+                print(traceback.format_exc())
+            else:
+                print("\nProces zakończono pomyślnie.")
     except Exception as e:
         with output_box:
-            print("\n=== WYJĄTEK ===\n")
-            traceback.print_exc()
+            clear_output()
+            print("\n=== WYJĄTEK ===")
+            print(traceback.format_exc())
 
 # Funkcja do tworzenia interfejsu jako zakładki
 def create_script_tab():
