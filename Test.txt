@@ -1,11 +1,9 @@
 import ipywidgets as widgets
-from IPython.display import display, clear_output, Image
+from IPython.display import display, clear_output
 import importlib.util
 import sys
 import subprocess
 import argparse
-import pandas as pd
-import matplotlib.pyplot as plt
 import warnings
 import io
 import contextlib
@@ -157,18 +155,6 @@ def create_script_tab():
                     if print_output:
                         print("=== OUTPUT ===")
                         print(print_output)
-                        try:
-                            df = pd.read_json(print_output)  # Spróbuj przekształcić w DataFrame
-                            display(df)  # Wyświetlanie DataFrame
-                        except ValueError:
-                            pass  # Brak DataFrame w stdout
-
-                        # Sprawdzanie, czy w stdout jest wykres
-                        if 'plt.show()' in stdout:
-                            plt.show()  # Wyświetlanie wykresu
-                        elif 'Image' in stdout:
-                            image_path = stdout.split()[-1]  # Załóżmy, że ścieżka obrazu znajduje się w ostatnim elemencie stdout
-                            display(Image(filename=image_path))  # Wyświetlanie obrazu
                     
                     # Sprawdzanie błędów
                     if stderr:
