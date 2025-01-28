@@ -4,8 +4,9 @@ import importlib.util
 import sys
 import subprocess
 import argparse
-import os
-import traceback
+import pandas as pd
+import matplotlib.pyplot as plt
+from IPython.display import Image
 
 # Ścieżki do skryptów
 scripts = {
@@ -34,43 +35,17 @@ def load_args(script_path):
     return args
 
 # Funkcja do uruchamiania skryptu
-def run_script(script_path, args, output_box):
+def run_script(script_path, args):
     cmd = ["python3", script_path]
     for key, value in args.items():
         cmd.append(f"--{key}")
         cmd.append(str(value))
     
     try:
-        with output_box:
-            clear_output()
-            print(f"Uruchamianie skryptu: {os.path.basename(script_path)}")
-            print(f"Argumenty: {args}")
-            print("\n=== WYNIK ===")
-            process = subprocess.Popen(
-                cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE, 
-                text=True
-            )
-            
-            # Strumieniowe wypisywanie outputu na bieżąco
-            for line in process.stdout:
-                print(line, end="")
-
-            # Obsługa błędów i wypisanie całego stderr
-            _, stderr = process.communicate()
-            if process.returncode != 0:
-                print("\n=== BŁĄD ===")
-                print(stderr)
-                print("\nTraceback:")
-                print(traceback.format_exc())
-            else:
-                print("\nProces zakończono pomyślnie.")
+        result = subprocess.run(cmd, text=True, capture_output=True)
+        return result.stdout, result.stderr
     except Exception as e:
-        with output_box:
-            clear_output()
-            print("\n=== WYJĄTEK ===")
-            print(traceback.format_exc())
+        return "", str(e)
 
 # Funkcja do tworzenia interfejsu jako zakładki
 def create_script_tab():
@@ -106,33 +81,51 @@ def create_script_tab():
     
     # Obsługa przycisku uruchamiania
     def on_run_button_click(b):
-        selected_script = script_dropdown.value
-        if not selected_script:
-            with output_box:
-                clear_output()
+        with output_box:
+            clear_output()
+            selected_script = script_dropdown.value
+            if not selected_script:
                 print("Nie wybrano skryptu.")
-            return
-        
-        script_path = scripts.get(selected_script)
-        if not script_path:
-            with output_box:
-                clear_output()
+                return
+            
+            script_path = scripts.get(selected_script)
+            if not script_path:
                 print("Nie znaleziono ścieżki do skryptu.")
-            return
-        
-        # Zbieranie argumentów
-        args = {}
-        for field in args_box.children:
-            args[field.description[:-1]] = field.value
-        
-        # Uruchamianie skryptu i wyświetlanie wyników
-        run_script(script_path, args, output_box)
-    
+                return
+            
+            # Zbieranie argumentów
+            args = {}
+            for field in args_box.children:
+                args[field.description[:-1]] = field.value
+            
+            print(f"Uruchamianie skryptu {selected_script} z argumentami: {args}")
+            stdout, stderr = run_script(script_path, args)
+            
+            # Wyświetlanie wyników
+            print("=== OUTPUT ===")
+            print(stdout)
+            print("=== ERROR ===")
+            print(stderr)
+
+            # Sprawdzanie, czy w stdout jest DataFrame
+            try:
+                df = pd.read_json(stdout)
+                display(df)  # Wyświetlanie DataFrame
+            except ValueError:
+                pass  # Brak DataFrame w stdout
+
+            # Sprawdzanie, czy w stdout jest wykres
+            if 'plt.show()' in stdout:
+                plt.show()  # Wyświetlanie wykresu
+            elif 'Image' in stdout:
+                image_path = stdout.split()[-1]  # Załóżmy, że ścieżka obrazu znajduje się w ostatnim elemencie stdout
+                display(Image(filename=image_path))  # Wyświetlanie obrazu
+
     # Powiązanie zdarzeń
     script_dropdown.observe(on_script_change, names="value")
     run_button.on_click(on_run_button_click)
     
-    # Zwrócenie widgetu
+    # Zwrócenie widgetu (zamiast wywoływania)
     return widgets.VBox([script_dropdown, args_box, run_button, output_box])
 
 # Przykładowe użycie w Tabie
