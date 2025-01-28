@@ -7,6 +7,8 @@ import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 import warnings
+import io
+import contextlib
 
 # Wyłączanie warningów
 warnings.filterwarnings("ignore")
@@ -38,17 +40,29 @@ def load_args(script_path):
     return args
 
 # Funkcja do uruchamiania skryptu
-def run_script(script_path, args):
+def run_script(script_path, args, module=None):
     cmd = ["python3", script_path]
     for key, value in args.items():
         cmd.append(f"--{key}")
         cmd.append(str(value))
-    
+
     try:
+        if module is not None and hasattr(module, "main"):
+            # Jeśli moduł ma funkcję main(), uruchamiamy ją
+            module.main()
+            return "Kod uruchomiony pomyślnie bez argumentów."
+        
         result = subprocess.run(cmd, text=True, capture_output=True)
         return result.stdout, result.stderr
     except Exception as e:
         return "", str(e)
+
+# Funkcja do uchwycenia printów w output_box
+def capture_prints(func):
+    """Pomaga przechwytywać printy z funkcji, by wyświetlić je w output_box."""
+    with io.StringIO() as buf, contextlib.redirect_stdout(buf):
+        func()
+        return buf.getvalue()
 
 # Funkcja do tworzenia interfejsu jako zakładki
 def create_script_tab():
@@ -76,6 +90,20 @@ def create_script_tab():
         script_path = scripts.get(change.new)
         if script_path:
             args = load_args(script_path)
+            fields = []
+            try:
+                spec = importlib.util.spec_from_file_location("module.name", script_path)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules["module.name"] = module
+                spec.loader.exec_module(module)
+                
+                # Jeśli skrypt ma funkcję main, ustawiamy ją
+                if hasattr(module, "main"):
+                    args = {}  # Skrypt nie potrzebuje argumentów, ponieważ używa funkcji main
+            except Exception as e:
+                print(f"Błąd podczas ładowania skryptu: {e}")
+                
+            # Tworzymy pola argumentów tylko, jeśli skrypt ma parser
             fields = []
             for arg, default in args.items():
                 field = widgets.Text(value=str(default), description=f"{arg}:")
@@ -106,33 +134,53 @@ def create_script_tab():
             for field in args_box.children:
                 args[field.description[:-1]] = field.value
             
-            print(f"Uruchamianie skryptu {selected_script} z argumentami: {args}")
-            stdout, stderr = run_script(script_path, args)
+            # Wyświetlanie informacji o uruchamianym skrypcie
+            print(f"Uruchamiam skrypt {selected_script} z argumentami: {args}")
             
-            # Sprawdzanie i wyświetlanie wyników
-            if stdout:
-                print("=== OUTPUT ===")
-                print(stdout)
-                try:
-                    df = pd.read_json(stdout)
-                    display(df)  # Wyświetlanie DataFrame
-                except ValueError:
-                    pass  # Brak DataFrame w stdout
+            try:
+                spec = importlib.util.spec_from_file_location("module.name", script_path)
+                module = importlib.util.module_from_spec(spec)
+                sys.modules["module.name"] = module
+                spec.loader.exec_module(module)
 
-                # Sprawdzanie, czy w stdout jest wykres
-                if 'plt.show()' in stdout:
-                    plt.show()  # Wyświetlanie wykresu
-                elif 'Image' in stdout:
-                    image_path = stdout.split()[-1]  # Załóżmy, że ścieżka obrazu znajduje się w ostatnim elemencie stdout
-                    display(Image(filename=image_path))  # Wyświetlanie obrazu
-            
-            # Sprawdzanie błędów
-            if stderr:
-                print("=== ERROR ===")
-                print(stderr)
+                # Uruchamiamy skrypt
+                result = run_script(script_path, args, module)
 
-            # Informacja o sukcesie
-            print("Skrypt został pomyślnie wykonany.")
+                # Sprawdzanie, czy skrypt zwrócił tekst
+                if isinstance(result, tuple):
+                    stdout, stderr = result
+
+                    # Przechwycenie printów w stdout
+                    print_output = capture_prints(lambda: print(stdout))
+                    print_error = capture_prints(lambda: print(stderr))
+                    
+                    if print_output:
+                        print("=== OUTPUT ===")
+                        print(print_output)
+                        try:
+                            df = pd.read_json(print_output)  # Spróbuj przekształcić w DataFrame
+                            display(df)  # Wyświetlanie DataFrame
+                        except ValueError:
+                            pass  # Brak DataFrame w stdout
+
+                        # Sprawdzanie, czy w stdout jest wykres
+                        if 'plt.show()' in stdout:
+                            plt.show()  # Wyświetlanie wykresu
+                        elif 'Image' in stdout:
+                            image_path = stdout.split()[-1]  # Załóżmy, że ścieżka obrazu znajduje się w ostatnim elemencie stdout
+                            display(Image(filename=image_path))  # Wyświetlanie obrazu
+                    
+                    # Sprawdzanie błędów
+                    if print_error:
+                        print("=== ERROR ===")
+                        print(print_error)
+                
+                # Informacja o sukcesie
+                if not isinstance(result, tuple) and result == "Kod uruchomiony pomyślnie bez argumentów.":
+                    print(result)
+
+            except Exception as e:
+                print(f"Błąd: {e}")
         
         # Odblokowanie przycisku i dropdowna
         run_button.disabled = False
