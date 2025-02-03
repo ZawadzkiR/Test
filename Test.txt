@@ -1,155 +1,89 @@
-# Funkcja do uruchamiania skryptu
-def run_script(script_path, args, module=None):
-    cmd = ["python3", script_path]
-    for key, value in args.items():
-        cmd.append(f"--{key}")
-        cmd.append(str(value))
 
-    try:
-        if module is not None and hasattr(module, "main"):
-            # Jeśli moduł ma funkcję main(), uruchamiamy ją
-            module.main()
-            return "Kod uruchomiony pomyślnie bez argumentów."
-        
-        result = subprocess.run(cmd, text=True, capture_output=True)
-        return result.stdout, result.stderr
-    except Exception as e:
-        return "", str(e)
 
-# Funkcja do uchwycenia printów w output_box
-def capture_prints(func):
-    """Pomaga przechwytywać printy z funkcji, by wyświetlić je w output_box."""
-    with io.StringIO() as buf, contextlib.redirect_stdout(buf):
-        func()
-        return buf.getvalue()
 
-# Funkcja do tworzenia interfejsu jako zakładki
-def create_script_tab():
-    # Dropdown do wyboru skryptu
-    script_dropdown = widgets.Dropdown(
-        options=[""] + list(scripts.keys()),
-        description="Skrypt:"
-    )
 
-    # Kontener na dynamiczne pola argumentów
-    args_box = widgets.VBox()
-    
-    # Przycisk do uruchamiania skryptu
-    run_button = widgets.Button(description="Uruchom")
-    
-    # Pole do wyświetlania wyników
-    output_box = widgets.Output()
 
-    # Obsługa zmiany wyboru skryptu
-    def on_script_change(change):
-        if not change.new:
-            args_box.children = []
-            return
-        
-        script_path = scripts.get(change.new)
-        if script_path:
-            args = load_args(script_path)
-            fields = []
-            try:
-                spec = importlib.util.spec_from_file_location("module.name", script_path)
-                module = importlib.util.module_from_spec(spec)
-                sys.modules["module.name"] = module
-                spec.loader.exec_module(module)
-                
-                # Jeśli skrypt ma funkcję main, ustawiamy ją
-                if hasattr(module, "main"):
-                    args = {}  # Skrypt nie potrzebuje argumentów, ponieważ używa funkcji main
-            except Exception as e:
-                print(f"Błąd podczas ładowania skryptu: {e}")
-                
-            # Tworzymy pola argumentów tylko, jeśli skrypt ma parser
-            fields = []
-            for arg, default in args.items():
-                field = widgets.Text(value=str(default), description=f"{arg}:")
-                fields.append(field)
-            args_box.children = fields
-    
-    # Obsługa przycisku uruchamiania
-    def on_run_button_click(b):
-        # Blokowanie przycisku i dropdowna
-        run_button.disabled = True
-        script_dropdown.disabled = True
-        
-        with output_box:
-            output_box.clear_output(wait=False)  # Użyj clear_output z wait=False, aby zachować poprzednie wykresy
 
-            selected_script = script_dropdown.value
-            if not selected_script:
-                print("Nie wybrano skryptu.")
-                return
-            
-            script_path = scripts.get(selected_script)
-            if not script_path:
-                print("Nie znaleziono ścieżki do skryptu.")
-                return
-            
-            # Zbieranie argumentów
-            args = {}
-            for field in args_box.children:
-                args[field.description[:-1]] = field.value
-            
-            # Wyświetlanie informacji o uruchamianym skrypcie
-            print(f"Uruchamiam skrypt {selected_script} z argumentami: {args}")
-            
-            try:
-                spec = importlib.util.spec_from_file_location("module.name", script_path)
-                module = importlib.util.module_from_spec(spec)
-                sys.modules["module.name"] = module
-                spec.loader.exec_module(module)
 
-                # Uruchamiamy skrypt
-                result = run_script(script_path, args, module)
 
-                # Sprawdzanie, czy skrypt zwrócił tekst
-                if isinstance(result, tuple):
-                    stdout, stderr = result
 
-                    # Przechwycenie printów w stdout
-                    print_output = capture_prints(lambda: print(stdout))
-                    print_error = capture_prints(lambda: print(stderr))
-                    
-                    if print_output:
-                        print("=== OUTPUT ===")
-                        print(print_output)
-                    
-                    # Sprawdzanie błędów
-                    if stderr:
-                        print("=== ERROR ===")
-                        print(stderr)
-                    else:
-                        print("Brak błędów.")
-                
-                # Informacja o sukcesie
-                if not isinstance(result, tuple) and result == "Kod uruchomiony pomyślnie bez argumentów.":
-                    print(result)
+from transformers import T5Tokenizer, T5ForConditionalGeneration, Trainer, TrainingArguments
+from datasets import load_dataset, Dataset
 
-            except Exception as e:
-                print(f"Błąd: {e}")
-        
-        # Odblokowanie przycisku i dropdowna
-        run_button.disabled = False
-        script_dropdown.disabled = False
+# 1. Wczytaj dane
+dataset = load_dataset('csv', data_files='data.csv')
 
-    # Powiązanie zdarzeń
-    script_dropdown.observe(on_script_change, names="value")
-    run_button.on_click(on_run_button_click)
-    
-    # Zwrócenie widgetu (zamiast wywoływania)
-    return widgets.VBox([script_dropdown, args_box, run_button, output_box])
+# 2. Przygotuj tokenizer i model
+model_name = "t5-small"
+tokenizer = T5Tokenizer.from_pretrained(model_name)
+model = T5ForConditionalGeneration.from_pretrained(model_name)
 
-# Przykładowe użycie w Tabie
-tab = widgets.Tab()
+# 3. Przygotuj dane do treningu
+def preprocess_function(examples):
+    inputs = [f"translate long to short: {text}" for text in examples["input"]]
+    targets = examples["target"]
+    model_inputs = tokenizer(inputs, max_length=64, truncation=True)
 
-# Tworzenie zakładki skryptu
-script_tab = create_script_tab()
+    # Tokenizuj cele (krótkie nazwy)
+    with tokenizer.as_target_tokenizer():
+        labels = tokenizer(targets, max_length=16, truncation=True)
 
-# Dodanie zakładki do Tabu
-tab.children = [script_tab]  # Możesz dodać więcej zakładek
-tab.set_title(0, "Skrypt")   # Tytuł zakładki
+    model_inputs["labels"] = labels["input_ids"]
+    return model_inputs
 
-display(tab)
+tokenized_datasets = dataset.map(preprocess_function, batched=True)
+
+# 4. Ustaw argumenty treningowe
+training_args = TrainingArguments(
+    output_dir="./results",
+    evaluation_strategy="epoch",
+    learning_rate=5e-5,
+    per_device_train_batch_size=8,
+    per_device_eval_batch_size=8,
+    num_train_epochs=3,
+    weight_decay=0.01,
+    save_total_limit=2,
+    save_steps=500,
+    logging_dir="./logs",
+    logging_steps=10,
+)
+
+# 5. Zdefiniuj Trainer
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_datasets["train"],
+    eval_dataset=tokenized_datasets["train"],  # W rzeczywistym przypadku użyj zbioru walidacyjnego
+    tokenizer=tokenizer,
+)
+
+# 6. Trenuj model
+trainer.train()
+
+# 7. Zapisz model
+model.save_pretrained("./fine-tuned-t5-small")
+tokenizer.save_pretrained("./fine-tuned-t5-small")
+
+from transformers import T5Tokenizer, T5ForConditionalGeneration
+
+# Wczytaj fine-tuned model
+model_path = "./fine-tuned-t5-small"
+tokenizer = T5Tokenizer.from_pretrained(model_path)
+model = T5ForConditionalGeneration.from_pretrained(model_path)
+
+# Funkcja do generowania krótkich nazw
+def generate_short_name(long_name, rank):
+    input_text = f"translate long to short: {long_name},{rank}"
+    input_ids = tokenizer(input_text, return_tensors="pt").input_ids
+
+    # Generuj krótką nazwę
+    outputs = model.generate(input_ids, max_length=16, num_beams=5, early_stopping=True)
+    short_name = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    return short_name
+
+# Przykład użycia
+long_name = "ABC Spółka z ograniczoną odpowiedzialnością"
+rank = "A"  # lub "B"
+short_name = generate_short_name(long_name, rank)
+print(f"Krótka nazwa: {short_name}")
