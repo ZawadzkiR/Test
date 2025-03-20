@@ -1,89 +1,49 @@
+import os
+import re
+import csv
+from collections import defaultdict
 
+def extract_tables_from_file(file_path, process_name):
+    pattern = re.compile(r'\b(\w+\.v_\w+)\b', re.IGNORECASE)
+    tables = defaultdict(set)
+    
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+        for line in file:
+            matches = pattern.findall(line)
+            for match in matches:
+                tables[match].add(process_name)
+    
+    return tables
 
+def scan_directory(directory):
+    extracted_tables = defaultdict(set)
+    
+    for root, _, files in os.walk(directory):
+        process_name = os.path.basename(root)  # Nazwa katalogu jako nazwa procesu
+        for file in files:
+            if file.endswith('.sql') or file.endswith('.py'):
+                file_path = os.path.join(root, file)
+                file_tables = extract_tables_from_file(file_path, process_name)
+                for table, processes in file_tables.items():
+                    extracted_tables[table].update(processes)
+    
+    return extracted_tables
 
+def save_to_csv(tables, output_file):
+    with open(output_file, 'w', newline='', encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Tabela', 'Procesy'])
+        for table, processes in sorted(tables.items()):
+            writer.writerow([table, ", ".join(sorted(processes))])
 
+def main():
+    directory = input("Podaj ścieżkę do katalogu z plikami: ")
+    output_file = "extracted_tables.csv"
+    
+    tables = scan_directory(directory)
+    save_to_csv(tables, output_file)
+    
+    print(f"Znalezione tabele zapisano do {output_file}")
 
-
-
-
-
-from transformers import T5Tokenizer, T5ForConditionalGeneration, Trainer, TrainingArguments
-from datasets import load_dataset, Dataset
-
-# 1. Wczytaj dane
-dataset = load_dataset('csv', data_files='data.csv')
-
-# 2. Przygotuj tokenizer i model
-model_name = "t5-small"
-tokenizer = T5Tokenizer.from_pretrained(model_name)
-model = T5ForConditionalGeneration.from_pretrained(model_name)
-
-# 3. Przygotuj dane do treningu
-def preprocess_function(examples):
-    inputs = [f"translate long to short: {text}" for text in examples["input"]]
-    targets = examples["target"]
-    model_inputs = tokenizer(inputs, max_length=64, truncation=True)
-
-    # Tokenizuj cele (krótkie nazwy)
-    with tokenizer.as_target_tokenizer():
-        labels = tokenizer(targets, max_length=16, truncation=True)
-
-    model_inputs["labels"] = labels["input_ids"]
-    return model_inputs
-
-tokenized_datasets = dataset.map(preprocess_function, batched=True)
-
-# 4. Ustaw argumenty treningowe
-training_args = TrainingArguments(
-    output_dir="./results",
-    evaluation_strategy="epoch",
-    learning_rate=5e-5,
-    per_device_train_batch_size=8,
-    per_device_eval_batch_size=8,
-    num_train_epochs=3,
-    weight_decay=0.01,
-    save_total_limit=2,
-    save_steps=500,
-    logging_dir="./logs",
-    logging_steps=10,
-)
-
-# 5. Zdefiniuj Trainer
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=tokenized_datasets["train"],
-    eval_dataset=tokenized_datasets["train"],  # W rzeczywistym przypadku użyj zbioru walidacyjnego
-    tokenizer=tokenizer,
-)
-
-# 6. Trenuj model
-trainer.train()
-
-# 7. Zapisz model
-model.save_pretrained("./fine-tuned-t5-small")
-tokenizer.save_pretrained("./fine-tuned-t5-small")
-
-from transformers import T5Tokenizer, T5ForConditionalGeneration
-
-# Wczytaj fine-tuned model
-model_path = "./fine-tuned-t5-small"
-tokenizer = T5Tokenizer.from_pretrained(model_path)
-model = T5ForConditionalGeneration.from_pretrained(model_path)
-
-# Funkcja do generowania krótkich nazw
-def generate_short_name(long_name, rank):
-    input_text = f"translate long to short: {long_name},{rank}"
-    input_ids = tokenizer(input_text, return_tensors="pt").input_ids
-
-    # Generuj krótką nazwę
-    outputs = model.generate(input_ids, max_length=16, num_beams=5, early_stopping=True)
-    short_name = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-    return short_name
-
-# Przykład użycia
-long_name = "ABC Spółka z ograniczoną odpowiedzialnością"
-rank = "A"  # lub "B"
-short_name = generate_short_name(long_name, rank)
-print(f"Krótka nazwa: {short_name}")
+if __name__ == "__main__":
+    main()
