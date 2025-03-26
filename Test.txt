@@ -2,7 +2,6 @@ import json
 import ipywidgets as widgets
 from IPython.display import display, clear_output
 from crontab import CronTab
-import subprocess
 
 # Tworzenie obiektu crontaba dla użytkownika
 cron = CronTab(user=True)
@@ -23,9 +22,7 @@ time_input = widgets.Text(description="Czas (crontab format):")
 env_input = widgets.Text(value="python3", description="Środowisko Python:")
 log_checkbox = widgets.Checkbox(value=False, description="Dodaj logi (2>&1)")
 add_button = widgets.Button(description="Dodaj Zadanie")
-update_button = widgets.Button(description="Zaktualizuj Zadanie")
 delete_button = widgets.Button(description="Usuń Zadanie")
-run_button = widgets.Button(description="Uruchom ręcznie")
 output_area = widgets.Output()
 
 # Lista zadań crontaba
@@ -33,6 +30,7 @@ job_selector = widgets.Dropdown(description="Wybierz zadanie:", options=["Brak z
 json_task_selector = widgets.Dropdown(description="Zadanie z JSON:", options=["Brak zadań"])
 load_jobs_button = widgets.Button(description="Odśwież zadania")
 load_json_button = widgets.Button(description="Wczytaj z JSON")
+add_from_json_button = widgets.Button(description="Dodaj z JSON")
 
 # Funkcja do odświeżania listy zadań
 def load_jobs():
@@ -46,15 +44,21 @@ def load_json_tasks(button=None):
 
 # Funkcja dodawania zadania
 def add_job(button):
-    command = command_input.value
-    comment = comment_input.value
-    time_str = time_input.value
-    env = env_input.value
-    command_full = f"{env} {command}"
+    command = command_input.value.strip()
+    comment = comment_input.value.strip()
+    time_str = time_input.value.strip()
+    env = env_input.value.strip()
     
+    if not command or not time_str or not comment:
+        with output_area:
+            clear_output()
+            print("Błąd: Uzupełnij wszystkie pola!")
+        return
+
+    command_full = f"{env} {command}"
     if log_checkbox.value:
         command_full += " 2>&1"
-    
+
     job = cron.new(command=command_full, comment=comment)
     job.setall(time_str)
     cron.write()
@@ -66,20 +70,29 @@ def add_job(button):
 # Funkcja dodawania zadania z JSON
 def add_json_job(button):
     task = json_task_selector.value
-    if task and task != "Brak zadań":
+    if isinstance(task, dict):  # Sprawdzenie, czy wybrano poprawne zadanie
         command_input.value = task["command"]
         comment_input.value = task["comment"]
         time_input.value = task["time"]
-        add_job(button)
+
+# Funkcja usuwania zadania
+def delete_job(button):
+    selected = job_selector.value
+    if isinstance(selected, tuple):
+        job = selected[1]
+        cron.remove(job)
+        cron.write()
+        load_jobs()
+        with output_area:
+            clear_output()
+            print("Usunięto zadanie.")
 
 # Przypisanie funkcji do przycisków
 add_button.on_click(add_job)
-update_button.on_click(lambda x: load_jobs())
-delete_button.on_click(lambda x: load_jobs())
-run_button.on_click(lambda x: load_jobs())
+delete_button.on_click(delete_job)
 load_jobs_button.on_click(load_jobs)
 load_json_button.on_click(load_json_tasks)
-json_task_selector.observe(lambda change: add_json_job(None), names='value')
+add_from_json_button.on_click(add_json_job)  # Poprawione, zamiast observe
 
 # Ładowanie zadań przy starcie
 load_jobs()
@@ -87,5 +100,5 @@ load_json_tasks()
 
 # Wyświetlenie widgetów
 display(command_input, comment_input, time_input, env_input, log_checkbox,
-        add_button, update_button, delete_button, run_button,
-        job_selector, load_jobs_button, json_task_selector, load_json_button, output_area)
+        add_button, delete_button, job_selector, load_jobs_button,
+        json_task_selector, load_json_button, add_from_json_button, output_area)
