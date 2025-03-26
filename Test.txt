@@ -22,6 +22,7 @@ time_input = widgets.Text(description="Czas (crontab format):")
 env_input = widgets.Text(value="python3", description="Środowisko Python:")
 log_checkbox = widgets.Checkbox(value=False, description="Dodaj logi (2>&1)")
 add_button = widgets.Button(description="Dodaj Zadanie")
+update_button = widgets.Button(description="Zaktualizuj Zadanie")
 delete_button = widgets.Button(description="Usuń Zadanie")
 output_area = widgets.Output()
 
@@ -78,21 +79,34 @@ def add_json_job(button):
 # Funkcja usuwania zadania
 def delete_job(button):
     selected = job_selector.value
-    if isinstance(selected, tuple):
-        job = selected[1]
-        cron.remove(job)
+    if isinstance(selected, tuple):  # Sprawdzamy, czy zadanie zostało wybrane
+        job = selected[1]  # Pobieramy zadanie z obiektu crontaba
+        cron.remove(job)  # Usuwamy zadanie
         cron.write()
-        load_jobs()
+        load_jobs()  # Odświeżamy listę
         with output_area:
             clear_output()
             print("Usunięto zadanie.")
+
+# Funkcja edytowania zadania
+def edit_job(change):
+    selected = job_selector.value
+    if isinstance(selected, tuple):  # Sprawdzamy, czy zadanie zostało wybrane
+        job = selected[1]  # Pobieramy zadanie z obiektu crontaba
+        # Wypełniamy pola wartościami zadania
+        command_input.value = job.command
+        comment_input.value = job.comment
+        time_input.value = job.slices[0].expressions[0]  # Wyciągamy czas z zadania
 
 # Przypisanie funkcji do przycisków
 add_button.on_click(add_job)
 delete_button.on_click(delete_job)
 load_jobs_button.on_click(load_jobs)
 load_json_button.on_click(load_json_tasks)
-add_from_json_button.on_click(add_json_job)  # Poprawione, zamiast observe
+add_from_json_button.on_click(add_json_job)
+
+# Przypisanie edytowania zadania do dropdowna
+job_selector.observe(edit_job, names="value")
 
 # Ładowanie zadań przy starcie
 load_jobs()
@@ -100,5 +114,5 @@ load_json_tasks()
 
 # Wyświetlenie widgetów
 display(command_input, comment_input, time_input, env_input, log_checkbox,
-        add_button, delete_button, job_selector, load_jobs_button,
+        add_button, update_button, delete_button, job_selector, load_jobs_button,
         json_task_selector, load_json_button, add_from_json_button, output_area)
