@@ -1,49 +1,91 @@
-import os
-import re
-import csv
-from collections import defaultdict
+import json
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+from crontab import CronTab
+import subprocess
 
-def extract_tables_from_file(file_path, process_name):
-    pattern = re.compile(r'\b(\w+\.v_\w+)\b', re.IGNORECASE)
-    tables = defaultdict(set)
-    
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
-        for line in file:
-            matches = pattern.findall(line)
-            for match in matches:
-                tables[match].add(process_name)
-    
-    return tables
+# Tworzenie obiektu crontaba dla użytkownika
+cron = CronTab(user=True)
 
-def scan_directory(directory):
-    extracted_tables = defaultdict(set)
-    
-    for root, _, files in os.walk(directory):
-        process_name = os.path.basename(root)  # Nazwa katalogu jako nazwa procesu
-        for file in files:
-            if file.endswith('.sql') or file.endswith('.py'):
-                file_path = os.path.join(root, file)
-                file_tables = extract_tables_from_file(file_path, process_name)
-                for table, processes in file_tables.items():
-                    extracted_tables[table].update(processes)
-    
-    return extracted_tables
+# Wczytywanie zadań z pliku crontab.json
+def load_tasks_from_json():
+    try:
+        with open("crontab.json", "r") as file:
+            tasks = json.load(file)
+        return [(task["name"], task) for task in tasks]
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
 
-def save_to_csv(tables, output_file):
-    with open(output_file, 'w', newline='', encoding='utf-8') as file:
-        writer = csv.writer(file)
-        writer.writerow(['Tabela', 'Procesy'])
-        for table, processes in sorted(tables.items()):
-            writer.writerow([table, ", ".join(sorted(processes))])
+# Widgety
+command_input = widgets.Text(description="Komenda:")
+comment_input = widgets.Text(description="Komentarz:")
+time_input = widgets.Text(description="Czas (crontab format):")
+env_input = widgets.Text(value="python3", description="Środowisko Python:")
+log_checkbox = widgets.Checkbox(value=False, description="Dodaj logi (2>&1)")
+add_button = widgets.Button(description="Dodaj Zadanie")
+update_button = widgets.Button(description="Zaktualizuj Zadanie")
+delete_button = widgets.Button(description="Usuń Zadanie")
+run_button = widgets.Button(description="Uruchom ręcznie")
+output_area = widgets.Output()
 
-def main():
-    directory = input("Podaj ścieżkę do katalogu z plikami: ")
-    output_file = "extracted_tables.csv"
-    
-    tables = scan_directory(directory)
-    save_to_csv(tables, output_file)
-    
-    print(f"Znalezione tabele zapisano do {output_file}")
+# Lista zadań crontaba
+job_selector = widgets.Dropdown(description="Wybierz zadanie:", options=["Brak zadań"])
+json_task_selector = widgets.Dropdown(description="Zadanie z JSON:", options=["Brak zadań"])
+load_jobs_button = widgets.Button(description="Odśwież zadania")
+load_json_button = widgets.Button(description="Wczytaj z JSON")
 
-if __name__ == "__main__":
-    main()
+# Funkcja do odświeżania listy zadań
+def load_jobs():
+    jobs = [(f"{job.comment}: {job.command}", job) for job in cron]
+    job_selector.options = jobs if jobs else ["Brak zadań"]
+
+# Funkcja wczytywania zadań z JSON do dropdowna
+def load_json_tasks(button=None):
+    tasks = load_tasks_from_json()
+    json_task_selector.options = tasks if tasks else ["Brak zadań"]
+
+# Funkcja dodawania zadania
+def add_job(button):
+    command = command_input.value
+    comment = comment_input.value
+    time_str = time_input.value
+    env = env_input.value
+    command_full = f"{env} {command}"
+    
+    if log_checkbox.value:
+        command_full += " 2>&1"
+    
+    job = cron.new(command=command_full, comment=comment)
+    job.setall(time_str)
+    cron.write()
+    load_jobs()
+    with output_area:
+        clear_output()
+        print("Dodano zadanie.")
+
+# Funkcja dodawania zadania z JSON
+def add_json_job(button):
+    task = json_task_selector.value
+    if task and task != "Brak zadań":
+        command_input.value = task["command"]
+        comment_input.value = task["comment"]
+        time_input.value = task["time"]
+        add_job(button)
+
+# Przypisanie funkcji do przycisków
+add_button.on_click(add_job)
+update_button.on_click(lambda x: load_jobs())
+delete_button.on_click(lambda x: load_jobs())
+run_button.on_click(lambda x: load_jobs())
+load_jobs_button.on_click(load_jobs)
+load_json_button.on_click(load_json_tasks)
+json_task_selector.observe(lambda change: add_json_job(None), names='value')
+
+# Ładowanie zadań przy starcie
+load_jobs()
+load_json_tasks()
+
+# Wyświetlenie widgetów
+display(command_input, comment_input, time_input, env_input, log_checkbox,
+        add_button, update_button, delete_button, run_button,
+        job_selector, load_jobs_button, json_task_selector, load_json_button, output_area)
