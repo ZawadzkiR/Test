@@ -1,118 +1,63 @@
-import json
-import ipywidgets as widgets
-from IPython.display import display, clear_output
-from crontab import CronTab
+import os
+import sys
+import shutil
+import zipfile
+from pathlib import Path
+import ctypes
+import tempfile
+import base64
 
-# Tworzenie obiektu crontaba dla użytkownika
-cron = CronTab(user=True)
+# Zakodowany zip jako base64 (wklejony niżej)
+embedded_zip_b64 = """
+<--- tutaj wkleimy dane ZIP jako base64 --->
+"""
 
-# Wczytywanie zadań z pliku crontab.json
-def load_tasks_from_json():
+INSTALL_DIR = Path("C:/Program Files/Aplikacja")
+DESKTOP = Path(os.path.join(os.environ["USERPROFILE"], "Desktop"))
+SHORTCUT_NAME = "Aplikacja.lnk"
+
+def is_admin():
     try:
-        with open("crontab.json", "r") as file:
-            tasks = json.load(file)
-        return [(task["name"], task) for task in tasks]
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
 
-# Widgety
-command_input = widgets.Text(description="Komenda:")
-comment_input = widgets.Text(description="Komentarz:")
-time_input = widgets.Text(description="Czas (crontab format):")
-env_input = widgets.Text(value="python3", description="Środowisko Python:")
-log_checkbox = widgets.Checkbox(value=False, description="Dodaj logi (2>&1)")
-add_button = widgets.Button(description="Dodaj Zadanie")
-update_button = widgets.Button(description="Zaktualizuj Zadanie")
-delete_button = widgets.Button(description="Usuń Zadanie")
-output_area = widgets.Output()
+def create_shortcut(target, shortcut_path, icon_path=None):
+    import pythoncom
+    from win32com.client import Dispatch
+    shell = Dispatch('WScript.Shell')
+    shortcut = shell.CreateShortcut(str(shortcut_path))
+    shortcut.TargetPath = str(target)
+    shortcut.WorkingDirectory = str(target.parent)
+    if icon_path:
+        shortcut.IconLocation = str(icon_path)
+    shortcut.save()
 
-# Lista zadań crontaba
-job_selector = widgets.Dropdown(description="Wybierz zadanie:", options=["Brak zadań"])
-json_task_selector = widgets.Dropdown(description="Zadanie z JSON:", options=["Brak zadań"])
-load_jobs_button = widgets.Button(description="Odśwież zadania")
-load_json_button = widgets.Button(description="Wczytaj z JSON")
-add_from_json_button = widgets.Button(description="Dodaj z JSON")
+def install():
+    print("📦 Rozpakowywanie aplikacji...")
 
-# Funkcja do odświeżania listy zadań
-def load_jobs():
-    jobs = [(f"{job.comment}: {job.command}", job) for job in cron]
-    job_selector.options = jobs if jobs else ["Brak zadań"]
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
 
-# Funkcja wczytywania zadań z JSON do dropdowna
-def load_json_tasks(button=None):
-    tasks = load_tasks_from_json()
-    json_task_selector.options = tasks if tasks else ["Brak zadań"]
+    # Dekoduj zip z base64 do tymczasowego pliku
+    zip_data = base64.b64decode(embedded_zip_b64)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
+        tmp_zip.write(zip_data)
+        zip_path = tmp_zip.name
 
-# Funkcja dodawania zadania
-def add_job(button):
-    command = command_input.value.strip()
-    comment = comment_input.value.strip()
-    time_str = time_input.value.strip()
-    env = env_input.value.strip()
-    
-    if not command or not time_str or not comment:
-        with output_area:
-            clear_output()
-            print("Błąd: Uzupełnij wszystkie pola!")
-        return
+    # Wypakuj zip
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(INSTALL_DIR)
 
-    command_full = f"{env} {command}"
-    if log_checkbox.value:
-        command_full += " 2>&1"
+    # Utwórz skrót (jeśli jest app.exe)
+    exe_path = INSTALL_DIR / "app.exe"
+    if exe_path.exists():
+        create_shortcut(exe_path, DESKTOP / SHORTCUT_NAME)
 
-    job = cron.new(command=command_full, comment=comment)
-    job.setall(time_str)
-    cron.write()
-    load_jobs()
-    with output_area:
-        clear_output()
-        print("Dodano zadanie.")
+    print("✅ Zainstalowano pomyślnie.")
 
-# Funkcja dodawania zadania z JSON
-def add_json_job(button):
-    task = json_task_selector.value
-    if isinstance(task, dict):  # Sprawdzenie, czy wybrano poprawne zadanie
-        command_input.value = task["command"]
-        comment_input.value = task["comment"]
-        time_input.value = task["time"]
-
-# Funkcja usuwania zadania
-def delete_job(button):
-    selected = job_selector.value
-    if isinstance(selected, tuple):  # Sprawdzamy, czy zadanie zostało wybrane
-        job = selected[1]  # Pobieramy zadanie z obiektu crontaba
-        cron.remove(job)  # Usuwamy zadanie
-        cron.write()
-        load_jobs()  # Odświeżamy listę
-        with output_area:
-            clear_output()
-            print("Usunięto zadanie.")
-
-# Funkcja edytowania zadania
-def edit_job(change):
-    selected = job_selector.value
-    if isinstance(selected, tuple):  # Sprawdzamy, czy zadanie zostało wybrane
-        job = selected[1]  # Pobieramy zadanie z obiektu crontaba
-        # Wypełniamy pola wartościami zadania
-        command_input.value = job.command
-        comment_input.value = job.comment
-        time_input.value = job.slices[0].expressions[0]  # Wyciągamy czas z zadania
-
-# Przypisanie funkcji do przycisków
-add_button.on_click(add_job)
-delete_button.on_click(delete_job)
-load_jobs_button.on_click(load_jobs)
-load_json_button.on_click(load_json_tasks)
-add_from_json_button.on_click(add_json_job)
-
-# Przypisanie edytowania zadania do dropdowna
-job_selector.observe(edit_job, names="value")
-
-# Ładowanie zadań przy starcie
-load_jobs()
-load_json_tasks()
-
-# Wyświetlenie widgetów
-display(command_input, comment_input, time_input, env_input, log_checkbox,
-        add_button, update_button, delete_button, job_selector, load_jobs_button,
-        json_task_selector, load_json_button, add_from_json_button, output_area)
+if __name__ == "__main__":
+    if not is_admin():
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, __file__, None, 1)
+    else:
+        install()
+        input("Naciśnij Enter aby zakończyć...")
