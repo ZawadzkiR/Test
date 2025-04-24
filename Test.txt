@@ -1,63 +1,128 @@
-import os
-import sys
-import shutil
+import tkinter as tk
+from tkinter import filedialog, messagebox
 import zipfile
-from pathlib import Path
+import io
+import os
+import shutil
+import sys
 import ctypes
-import tempfile
-import base64
 
-# Zakodowany zip jako base64 (wklejony niżej)
-embedded_zip_b64 = """
-<--- tutaj wkleimy dane ZIP jako base64 --->
-"""
-
-INSTALL_DIR = Path("C:/Program Files/Aplikacja")
-DESKTOP = Path(os.path.join(os.environ["USERPROFILE"], "Desktop"))
-SHORTCUT_NAME = "Aplikacja.lnk"
-
+# ------------------------------
+# WYMUSZANIE ADMINA
+# ------------------------------
 def is_admin():
     try:
         return ctypes.windll.shell32.IsUserAnAdmin()
     except:
         return False
 
-def create_shortcut(target, shortcut_path, icon_path=None):
-    import pythoncom
-    from win32com.client import Dispatch
-    shell = Dispatch('WScript.Shell')
-    shortcut = shell.CreateShortcut(str(shortcut_path))
-    shortcut.TargetPath = str(target)
-    shortcut.WorkingDirectory = str(target.parent)
-    if icon_path:
-        shortcut.IconLocation = str(icon_path)
-    shortcut.save()
+if not is_admin():
+    ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+    sys.exit()
 
-def install():
-    print("📦 Rozpakowywanie aplikacji...")
+# ------------------------------
+# TU WKLEJ DANE ZIP
+# ------------------------------
+# To są przykładowe dane ZIP — podmień na prawdziwe
+binary_zip = io.BytesIO()
+with zipfile.ZipFile(binary_zip, mode="w") as z:
+    z.writestr("start.exe", "To jest przykładowy plik wykonywalny")
+binary_zip = binary_zip.getvalue()
 
-    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+# ------------------------------
+# GUI APLIKACJA
+# ------------------------------
+class InstallerApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Instalator")
+        self.geometry("400x300")
+        self.path = tk.StringVar(value=r"C:\Program Files\MojaAplikacja")
+        self.shortcut = tk.BooleanVar()
+        self.create_main_menu()
 
-    # Dekoduj zip z base64 do tymczasowego pliku
-    zip_data = base64.b64decode(embedded_zip_b64)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp_zip:
-        tmp_zip.write(zip_data)
-        zip_path = tmp_zip.name
+    def create_main_menu(self):
+        self.clear_window()
+        tk.Label(self, text="Wybierz opcję:").pack(pady=20)
+        tk.Button(self, text="Zainstaluj", command=self.install_step1).pack(pady=10)
+        tk.Button(self, text="Odinstaluj", command=self.uninstall).pack(pady=10)
 
-    # Wypakuj zip
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(INSTALL_DIR)
+    def install_step1(self):
+        self.clear_window()
+        tk.Label(self, text="Wybierz folder instalacji:").pack(pady=10)
+        tk.Entry(self, textvariable=self.path, width=40).pack()
+        tk.Button(self, text="Przeglądaj", command=self.browse_path).pack(pady=5)
+        tk.Button(self, text="Dalej", command=self.install_step2).pack(pady=20)
 
-    # Utwórz skrót (jeśli jest app.exe)
-    exe_path = INSTALL_DIR / "app.exe"
-    if exe_path.exists():
-        create_shortcut(exe_path, DESKTOP / SHORTCUT_NAME)
+    def install_step2(self):
+        self.clear_window()
+        tk.Label(self, text="Utworzyć skrót na pulpicie?").pack(pady=20)
+        tk.Checkbutton(self, text="Tak", variable=self.shortcut).pack()
+        tk.Button(self, text="Zainstaluj", command=self.install).pack(pady=20)
 
-    print("✅ Zainstalowano pomyślnie.")
+    def browse_path(self):
+        selected = filedialog.askdirectory()
+        if selected:
+            self.path.set(selected)
+
+    def install(self):
+        try:
+            install_dir = self.path.get()
+            os.makedirs(install_dir, exist_ok=True)
+            with zipfile.ZipFile(io.BytesIO(binary_zip)) as zf:
+                zf.extractall(install_dir)
+
+            if self.shortcut.get():
+                self.create_shortcut(install_dir)
+
+            messagebox.showinfo("Sukces", f"Zainstalowano w: {install_dir}")
+            self.create_main_menu()
+        except Exception as e:
+            messagebox.showerror("Błąd", str(e))
+
+    def create_shortcut(self, install_dir):
+        desktop = os.path.join(os.path.join(os.environ["USERPROFILE"]), "Desktop")
+        target = os.path.join(install_dir, "start.exe")
+        shortcut_path = os.path.join(desktop, "MojaAplikacja.lnk")
+
+        try:
+            import pythoncom
+            from win32com.client import Dispatch
+            shell = Dispatch('WScript.Shell')
+            shortcut = shell.CreateShortCut(shortcut_path)
+            shortcut.Targetpath = target
+            shortcut.WorkingDirectory = install_dir
+            shortcut.IconLocation = target
+            shortcut.save()
+        except Exception as e:
+            print("Nie udało się stworzyć skrótu:", e)
+
+    def uninstall(self):
+        self.clear_window()
+        tk.Label(self, text="Wybierz folder instalacji do usunięcia:").pack(pady=10)
+        path = tk.StringVar()
+        tk.Entry(self, textvariable=path, width=40).pack()
+        tk.Button(self, text="Przeglądaj", command=lambda: self.browse_uninstall_path(path)).pack(pady=5)
+        tk.Button(self, text="Odinstaluj", command=lambda: self.delete_folder(path.get())).pack(pady=20)
+
+    def browse_uninstall_path(self, path_var):
+        selected = filedialog.askdirectory()
+        if selected:
+            path_var.set(selected)
+
+    def delete_folder(self, path):
+        try:
+            shutil.rmtree(path)
+            messagebox.showinfo("Sukces", "Usunięto katalog.")
+        except Exception as e:
+            messagebox.showerror("Błąd", str(e))
+        self.create_main_menu()
+
+    def clear_window(self):
+        for widget in self.winfo_children():
+            widget.destroy()
 
 if __name__ == "__main__":
-    if not is_admin():
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, __file__, None, 1)
-    else:
-        install()
-        input("Naciśnij Enter aby zakończyć...")
+    app = InstallerApp()
+    app.mainloop()
