@@ -1,128 +1,44 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox
-import zipfile
-import io
-import os
-import shutil
-import sys
-import ctypes
+import requests
 
-# ------------------------------
-# WYMUSZANIE ADMINA
-# ------------------------------
-def is_admin():
-    try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
-    except:
-        return False
+# ======== KONFIGURACJA ========
+username      = "TWOJ_USERNAME"
+app_password  = "TWOJE_APP_HASLO"
+workspace     = "TWOJE_WORKSPACE"
+repo_slug     = "TWOJE_REPO"
+branch_name   = "master"
+plik_path     = "log.txt"
+commit_msg    = "Aktualizacja log.txt (force)"
+# ===============================
 
-if not is_admin():
-    ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable, " ".join(sys.argv), None, 1)
-    sys.exit()
+# 1. Pobierz ostatni commit SHA z gałęzi
+url_branch = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}/refs/branches/{branch_name}"
+resp = requests.get(url_branch, auth=(username, app_password))
 
-# ------------------------------
-# TU WKLEJ DANE ZIP
-# ------------------------------
-# To są przykładowe dane ZIP — podmień na prawdziwe
-binary_zip = io.BytesIO()
-with zipfile.ZipFile(binary_zip, mode="w") as z:
-    z.writestr("start.exe", "To jest przykładowy plik wykonywalny")
-binary_zip = binary_zip.getvalue()
+if resp.status_code != 200:
+    print("❌ Nie udało się pobrać informacji o gałęzi.")
+    print(resp.text)
+    exit(1)
 
-# ------------------------------
-# GUI APLIKACJA
-# ------------------------------
-class InstallerApp(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Instalator")
-        self.geometry("400x300")
-        self.path = tk.StringVar(value=r"C:\Program Files\MojaAplikacja")
-        self.shortcut = tk.BooleanVar()
-        self.create_main_menu()
+last_commit_sha = resp.json()["target"]["hash"]
+print(f"✅ SHA ostatniego commita: {last_commit_sha}")
 
-    def create_main_menu(self):
-        self.clear_window()
-        tk.Label(self, text="Wybierz opcję:").pack(pady=20)
-        tk.Button(self, text="Zainstaluj", command=self.install_step1).pack(pady=10)
-        tk.Button(self, text="Odinstaluj", command=self.uninstall).pack(pady=10)
+# 2. Wyślij nowy plik jako commit z tym SHA jako jedynym rodzicem
+url_commit = f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}/src"
 
-    def install_step1(self):
-        self.clear_window()
-        tk.Label(self, text="Wybierz folder instalacji:").pack(pady=10)
-        tk.Entry(self, textvariable=self.path, width=40).pack()
-        tk.Button(self, text="Przeglądaj", command=self.browse_path).pack(pady=5)
-        tk.Button(self, text="Dalej", command=self.install_step2).pack(pady=20)
+with open(plik_path, "rb") as f:
+    files = {
+        "log.txt": f
+    }
+    data = {
+        "branch": branch_name,
+        "message": commit_msg,
+        "parents": last_commit_sha,
+    }
+    resp2 = requests.post(url_commit, auth=(username, app_password), files=files, data=data)
 
-    def install_step2(self):
-        self.clear_window()
-        tk.Label(self, text="Utworzyć skrót na pulpicie?").pack(pady=20)
-        tk.Checkbutton(self, text="Tak", variable=self.shortcut).pack()
-        tk.Button(self, text="Zainstaluj", command=self.install).pack(pady=20)
-
-    def browse_path(self):
-        selected = filedialog.askdirectory()
-        if selected:
-            self.path.set(selected)
-
-    def install(self):
-        try:
-            install_dir = self.path.get()
-            os.makedirs(install_dir, exist_ok=True)
-            with zipfile.ZipFile(io.BytesIO(binary_zip)) as zf:
-                zf.extractall(install_dir)
-
-            if self.shortcut.get():
-                self.create_shortcut(install_dir)
-
-            messagebox.showinfo("Sukces", f"Zainstalowano w: {install_dir}")
-            self.create_main_menu()
-        except Exception as e:
-            messagebox.showerror("Błąd", str(e))
-
-    def create_shortcut(self, install_dir):
-        desktop = os.path.join(os.path.join(os.environ["USERPROFILE"]), "Desktop")
-        target = os.path.join(install_dir, "start.exe")
-        shortcut_path = os.path.join(desktop, "MojaAplikacja.lnk")
-
-        try:
-            import pythoncom
-            from win32com.client import Dispatch
-            shell = Dispatch('WScript.Shell')
-            shortcut = shell.CreateShortCut(shortcut_path)
-            shortcut.Targetpath = target
-            shortcut.WorkingDirectory = install_dir
-            shortcut.IconLocation = target
-            shortcut.save()
-        except Exception as e:
-            print("Nie udało się stworzyć skrótu:", e)
-
-    def uninstall(self):
-        self.clear_window()
-        tk.Label(self, text="Wybierz folder instalacji do usunięcia:").pack(pady=10)
-        path = tk.StringVar()
-        tk.Entry(self, textvariable=path, width=40).pack()
-        tk.Button(self, text="Przeglądaj", command=lambda: self.browse_uninstall_path(path)).pack(pady=5)
-        tk.Button(self, text="Odinstaluj", command=lambda: self.delete_folder(path.get())).pack(pady=20)
-
-    def browse_uninstall_path(self, path_var):
-        selected = filedialog.askdirectory()
-        if selected:
-            path_var.set(selected)
-
-    def delete_folder(self, path):
-        try:
-            shutil.rmtree(path)
-            messagebox.showinfo("Sukces", "Usunięto katalog.")
-        except Exception as e:
-            messagebox.showerror("Błąd", str(e))
-        self.create_main_menu()
-
-    def clear_window(self):
-        for widget in self.winfo_children():
-            widget.destroy()
-
-if __name__ == "__main__":
-    app = InstallerApp()
-    app.mainloop()
+if resp2.status_code in (200, 201):
+    print("✅ Plik nadpisany w gałęzi master – symulowany force push zakończony.")
+else:
+    print("❌ Błąd przy tworzeniu commita:")
+    print(resp2.status_code)
+    print(resp2.text)
