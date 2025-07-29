@@ -146,3 +146,62 @@ if __name__ == "__main__":
 
 
 
+
+import sys
+import importlib
+import yaml
+import datetime
+import os
+
+SCHEDULE_FILE = os.path.join(os.path.dirname(__file__), "schedules", "WYDZIAŁ1.yaml")  # lub dynamiczne wskazanie
+
+def is_weekday():
+    return datetime.datetime.today().weekday() < 5  # pon-pt = 0-4
+
+def load_job_config():
+    with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f).get("jobs", {})
+
+def run_job(job_name, config):
+    job = config.get(job_name)
+    if not job:
+        print(f"⚠️ Job '{job_name}' nie znaleziony w YAML")
+        return
+
+    if not job.get("enabled", True):
+        print(f"⏭️ Pomijam '{job_name}' – disabled")
+        return
+
+    # Tylko uruchamiaj job jeśli dziś pasuje do jego harmonogramu (np. days: ["MON", "FRI"])
+    trigger = job.get("trigger")
+    valid_today = True
+
+    if trigger == "weekly":
+        days = job.get("days", ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"])
+        today_str = datetime.datetime.today().strftime("%a").upper()
+        if today_str not in days:
+            valid_today = False
+
+    if not valid_today:
+        print(f"⏭️ Pomijam '{job_name}' – nie dzisiaj wg triggera weekly")
+        return
+
+    try:
+        module = importlib.import_module(f"jobs.{job_name}")
+        print(f"▶ Uruchamiam: {job_name}")
+        module.main()
+        print(f"✔ Zakończono: {job_name}\n")
+    except Exception as e:
+        print(f"❌ Błąd w {job_name}: {e}\n")
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Użycie: python runner.py job1 [job2 ...]")
+        sys.exit(1)
+
+    job_config = load_job_config()
+
+    for job_name in sys.argv[1:]:
+        run_job(job_name, job_config)
+
+
