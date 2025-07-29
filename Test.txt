@@ -1,35 +1,148 @@
-import git
+folder: "WYDZIAŁ1"
+
+jobs:
+  job1:
+    enabled: true
+    command: "python C:\\repo\\runner.py job1"
+    trigger: "weekly"
+    start_time: "07:30"
+    days: ["MON", "WED", "FRI"]
+    timeout_minutes: 15
+    run_as_highest: true
+
+  job2:
+    enabled: true
+    command: "python C:\\repo\\runner.py job2"
+    trigger: "once"
+    start_time: "2025-07-30T09:00"
+    timeout_minutes: 5
+    run_as_highest: false
+
+  job3:
+    enabled: false
+    command: "python C:\\repo\\runner.py job3"
+    trigger: "daily"
+    start_time: "08:00"
+
+
 import os
+import yaml
+import subprocess
+import datetime
 
-# ====== KONFIGURACJA ======
-repo_path = "/sciezka/do/twojego/lokalnego/repo"  # lokalne repo
-file_path = os.path.join(repo_path, "log.md")     # plik do aktualizacji
-commit_message = "Aktualizacja log.md"
-branch_name = "master"
-# ==========================
+SCHEDULE_DIR = "schedules"
 
-# 1. Otwórz repozytorium
-repo = git.Repo(repo_path)
+def run_cmd(cmd):
+    return subprocess.run(cmd, capture_output=True, text=True, shell=True)
 
-# 2. Przełącz na master (opcjonalnie, jeśli nie jesteś na nim)
-repo.git.checkout(branch_name)
+def task_exists(full_task_name):
+    result = run_cmd(f'schtasks /Query /TN "{full_task_name}"')
+    return result.returncode == 0
 
-# 3. Nadpisz plik (tu zakładamy, że plik jest już pod repo i aktualny na dysku)
-#    Jeśli chcesz, możesz tu zapisać nową zawartość do pliku:
-# with open(file_path, "w", encoding="utf-8") as f:
-#     f.write("# Nowy Markdown content\n")
+def delete_task(full_task_name):
+    print(f"🗑 Usuwanie zadania: {full_task_name}")
+    run_cmd(f'schtasks /Delete /TN "{full_task_name}" /F')
 
-# 4. Dodaj plik do indexu (stage)
-repo.index.add([file_path])
+def compute_end_time(job):
+    """Zwraca czas zakończenia zadania jako HH:MM (start + timeout_minutes)"""
+    if job["trigger"] == "once":
+        dt = datetime.datetime.fromisoformat(job["start_time"])
+    else:
+        t = job.get("start_time", "08:00")
+        dt = datetime.datetime.combine(datetime.date.today(), datetime.datetime.strptime(t, "%H:%M").time())
+    timeout = datetime.timedelta(minutes=job.get("timeout_minutes", 10))
+    end = dt + timeout
+    return end.strftime("%H:%M")
 
-# 5. Zrób commit (jeśli są zmiany)
-if repo.is_dirty(untracked_files=True):
-    repo.index.commit(commit_message)
-else:
-    print("Brak zmian do zatwierdzenia.")
+def create_or_update_task(folder, job_name, job):
+    full_task_name = f"\\{folder}\\{job_name}"
 
-# 6. Wypchnij do remote 'origin' gałęzi master z force (nadpisanie)
-origin = repo.remote(name='origin')
-origin.push(refspec=f"{branch_name}:{branch_name}", force=True)
+    if task_exists(full_task_name):
+        delete_task(full_task_name)
 
-print("✅ Plik zaktualizowany i wypchnięty do Bitbucket (force push).")
+    cmd = job["command"]
+    trigger = job.get("trigger", "daily")
+    timeout = job.get("timeout_minutes", 10)
+    highest = job.get("run_as_highest", False)
+
+    schtasks_cmd = f'schtasks /Create /TN "{full_task_name}" /TR "{cmd}" /F'
+
+    # Uprawnienia
+    if highest:
+        schtasks_cmd += " /RL HIGHEST"
+
+    # Harmonogram
+    if trigger == "once":
+        dt = datetime.datetime.fromisoformat(job["start_time"])
+        schtasks_cmd += f' /SC ONCE /ST {dt.strftime("%H:%M")} /SD {dt.strftime("%Y/%m/%d")}'
+    elif trigger == "daily":
+        schtasks_cmd += f' /SC DAILY /ST {job.get("start_time", "08:00")}'
+    elif trigger == "weekly":
+        days = ",".join(job.get("days", ["MON", "TUE", "WED", "THU", "FRI"]))
+        schtasks_cmd += f' /SC WEEKLY /ST {job.get("start_time", "08:00")} /D {days}'
+    elif trigger == "minute":
+        interval = job.get("interval", 5)
+        schtasks_cmd += f' /SC MINUTE /MO {interval}'
+    elif trigger == "hourly":
+        interval = job.get("interval", 1)
+        schtasks_cmd += f' /SC HOURLY /MO {interval}'
+    else:
+        print(f"⚠️ Nieobsługiwany trigger: {trigger}")
+        return
+
+    # Czas zakończenia (timeout)
+    if timeout:
+        schtasks_cmd += f' /ET {compute_end_time(job)}'
+
+    print(f"🆕 Tworzenie zadania: {full_task_name}")
+    result = run_cmd(schtasks_cmd)
+    if result.returncode != 0:
+        print(f"❌ Błąd: {result.stderr}")
+    else:
+        print("✅ Zadanie utworzone")
+
+def get_existing_tasks(folder):
+    result = run_cmd(f'schtasks /Query /FO LIST /TN "\\{folder}"')
+    if result.returncode != 0:
+        return []
+    return [
+        line.split(":")[1].strip()
+        for line in result.stdout.splitlines()
+        if line.startswith("TaskName:")
+    ]
+
+def sync_schedule_file(path):
+    with open(path, "r") as f:
+        config = yaml.safe_load(f)
+
+    folder = config["folder"]
+    jobs = config.get("jobs", {})
+
+    defined_jobs = set()
+
+    for job_name, job in jobs.items():
+        full_name = f"\\{folder}\\{job_name}"
+        if job.get("enabled", True):
+            create_or_update_task(folder, job_name, job)
+        else:
+            if task_exists(full_name):
+                delete_task(full_name)
+        defined_jobs.add(full_name)
+
+    # Usuń zadania, które są w harmonogramie, ale nie w YAML
+    existing_tasks = get_existing_tasks(folder)
+    for task in existing_tasks:
+        if task not in defined_jobs:
+            delete_task(task)
+
+def sync_all():
+    for file in os.listdir(SCHEDULE_DIR):
+        if file.endswith(".yaml"):
+            print(f"\n🔄 Przetwarzanie {file}")
+            sync_schedule_file(os.path.join(SCHEDULE_DIR, file))
+
+if __name__ == "__main__":
+    sync_all()
+
+
+
