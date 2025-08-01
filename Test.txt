@@ -1,53 +1,68 @@
-import sys
 import os
-import datetime
 import yaml
 import subprocess
+import getpass
+import tempfile
 
-# Wczytaj konfigurację
-with open("config.yaml") as f:
-    config = yaml.safe_load(f)
+PYTHON_PATH = subprocess.check_output(["which", "python3"]).decode().strip()
+RUNNER_PATH = os.path.abspath("runner.py")
 
-def is_weekday():
-    return datetime.datetime.today().weekday() < 5  # 0-4 to pon-pt
+# Wczytaj pliki YAML
+with open("tasks.yaml") as f:
+    tasks = yaml.safe_load(f)
 
-def run_job(job_name):
-    job_config = config.get(job_name, {})
-    if not job_config:
-        print(f"Brak konfiguracji dla {job_name}")
-        return
+# Przygotuj wpisy crontab dla każdego użytkownika
+user_cron = {}
 
-    if job_config.get("only_weekdays") and not is_weekday():
-        print(f"Pomijam {job_name} - tylko w dni robocze")
-        return
+for task_name, task in tasks.items():
+    schedule = task.get("schedule")
+    user = task.get("user", getpass.getuser())
+    enabled = task.get("enabled", True)
 
-    script_path = os.path.join("jobs", f"{job_name}.py")
+    if not schedule:
+        continue
 
-    if not os.path.isfile(script_path):
-        print(f"Plik {script_path} nie istnieje")
-        return
+    if "command" in task:
+        command = task["command"]
+    elif "jobs" in task:
+        job_args = " ".join(task["jobs"])
+        command = f"{PYTHON_PATH} {RUNNER_PATH} {job_args}"
+    else:
+        continue  # pomiń niepoprawnie zdefiniowane
 
+    line = f"{schedule} {command} >> /tmp/{task_name}.log 2>&1  # Automate: {task_name}"
+
+    if not enabled:
+        line = f"# {line}"
+
+    if user not in user_cron:
+        user_cron[user] = []
+
+    user_cron[user].append(line)
+
+# Przetwarzanie crontabów każdego użytkownika osobno
+for user, new_lines in user_cron.items():
+    # Pobierz obecny crontab użytkownika
     try:
-        print(f"\n=== Uruchamiam {job_name} ===")
-        result = subprocess.run(
-            [sys.executable, script_path],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        print(result.stdout)
-        if result.stderr:
-            print(f"--- Błędy {job_name} ---")
-            print(result.stderr)
-    except subprocess.CalledProcessError as e:
-        print(f"Błąd podczas uruchamiania {job_name}:")
-        print(e.stdout)
-        print(e.stderr)
+        result = subprocess.run(["crontab", "-l", "-u", user], capture_output=True, text=True, check=False)
+        existing_cron = result.stdout if result.returncode == 0 else ""
+    except Exception as e:
+        print(f"Nie można pobrać crontaba dla użytkownika {user}: {e}")
+        existing_cron = ""
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Użycie: python runner.py job1 [job2 job3...]")
-        sys.exit(1)
+    # Usuń wszystkie poprzednie wpisy Automate tego użytkownika
+    filtered_lines = [line for line in existing_cron.splitlines() if "# Automate:" not in line]
 
-    for job in sys.argv[1:]:
-        run_job(job)
+    # Dodaj nowe
+    updated_cron = "\n".join(filtered_lines + new_lines) + "\n"
+
+    # Zapisz do tymczasowego pliku
+    with tempfile.NamedTemporaryFile(delete=False, mode="w") as tmpfile:
+        tmpfile.write(updated_cron)
+        tmpfile_path = tmpfile.name
+
+    # Załaduj nowy crontab
+    subprocess.run(["crontab", "-u", user, tmpfile_path])
+
+    print(f"✅ Crontab zaktualizowany dla użytkownika: {user}")
+    os.unlink(tmpfile_path)
