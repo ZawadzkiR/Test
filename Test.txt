@@ -21,14 +21,20 @@ filtered_tasks = {
     if task.get("user", CURRENT_USER) == CURRENT_USER
 }
 
-# Zbuduj nowe wpisy crontaba
+# Zbuduj unikalne wpisy crontaba
+seen_entries = set()
 new_entries = []
+
 for task_name, task in filtered_tasks.items():
-    schedule = task.get("schedule")
+    schedules = task.get("schedule")
     enabled = task.get("enabled", True)
 
-    if not schedule:
+    if not schedules:
         continue
+
+    # pozwalamy na listę lub pojedynczy string
+    if isinstance(schedules, str):
+        schedules = [schedules]
 
     if "command" in task:
         command = task["command"]
@@ -36,14 +42,18 @@ for task_name, task in filtered_tasks.items():
         job_args = " ".join(task["jobs"])
         command = f"{PYTHON_PATH} {RUNNER_PATH} {job_args}"
     else:
-        continue  # zadanie źle zdefiniowane
+        continue  # niepoprawna definicja taska
 
-    cron_line = f"{schedule} {command} >> /tmp/{task_name}.log 2>&1  # Automate: {task_name}"
+    for schedule in schedules:
+        key = (schedule, command)
+        if key in seen_entries:
+            continue  # nie dodawaj duplikatu
+        seen_entries.add(key)
 
-    if not enabled:
-        cron_line = f"# {cron_line}"
-
-    new_entries.append(cron_line)
+        line = f"{schedule} {command} >> /tmp/{task_name}.log 2>&1  # Automate: {task_name}"
+        if not enabled:
+            line = f"# {line}"
+        new_entries.append(line)
 
 # Pobierz obecny crontab użytkownika
 result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
