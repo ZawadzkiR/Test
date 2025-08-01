@@ -4,19 +4,27 @@ import subprocess
 import getpass
 import tempfile
 
+# Ścieżka do Pythona i runnera
 PYTHON_PATH = subprocess.check_output(["which", "python3"]).decode().strip()
 RUNNER_PATH = os.path.abspath("runner.py")
 
-# Wczytaj pliki YAML
+# Nazwa użytkownika aktualnie uruchamiającego skrypt
+CURRENT_USER = getpass.getuser()
+
+# Wczytaj YAML
 with open("tasks.yaml") as f:
     tasks = yaml.safe_load(f)
 
-# Przygotuj wpisy crontab dla każdego użytkownika
-user_cron = {}
+# Filtruj tylko zadania przypisane do aktualnego użytkownika
+filtered_tasks = {
+    name: task for name, task in tasks.items()
+    if task.get("user", CURRENT_USER) == CURRENT_USER
+}
 
-for task_name, task in tasks.items():
+# Zbuduj nowe wpisy crontaba
+new_entries = []
+for task_name, task in filtered_tasks.items():
     schedule = task.get("schedule")
-    user = task.get("user", getpass.getuser())
     enabled = task.get("enabled", True)
 
     if not schedule:
@@ -28,41 +36,31 @@ for task_name, task in tasks.items():
         job_args = " ".join(task["jobs"])
         command = f"{PYTHON_PATH} {RUNNER_PATH} {job_args}"
     else:
-        continue  # pomiń niepoprawnie zdefiniowane
+        continue  # zadanie źle zdefiniowane
 
-    line = f"{schedule} {command} >> /tmp/{task_name}.log 2>&1  # Automate: {task_name}"
+    cron_line = f"{schedule} {command} >> /tmp/{task_name}.log 2>&1  # Automate: {task_name}"
 
     if not enabled:
-        line = f"# {line}"
+        cron_line = f"# {cron_line}"
 
-    if user not in user_cron:
-        user_cron[user] = []
+    new_entries.append(cron_line)
 
-    user_cron[user].append(line)
+# Pobierz obecny crontab użytkownika
+result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+existing_cron = result.stdout if result.returncode == 0 else ""
 
-# Przetwarzanie crontabów każdego użytkownika osobno
-for user, new_lines in user_cron.items():
-    # Pobierz obecny crontab użytkownika
-    try:
-        result = subprocess.run(["crontab", "-l", "-u", user], capture_output=True, text=True, check=False)
-        existing_cron = result.stdout if result.returncode == 0 else ""
-    except Exception as e:
-        print(f"Nie można pobrać crontaba dla użytkownika {user}: {e}")
-        existing_cron = ""
+# Usuń stare wpisy # Automate:
+filtered_lines = [line for line in existing_cron.splitlines() if "# Automate:" not in line]
 
-    # Usuń wszystkie poprzednie wpisy Automate tego użytkownika
-    filtered_lines = [line for line in existing_cron.splitlines() if "# Automate:" not in line]
+# Dodaj nowe wpisy
+final_cron = "\n".join(filtered_lines + new_entries) + "\n"
 
-    # Dodaj nowe
-    updated_cron = "\n".join(filtered_lines + new_lines) + "\n"
+# Zapisz i załaduj
+with tempfile.NamedTemporaryFile(delete=False, mode="w") as tmpfile:
+    tmpfile.write(final_cron)
+    tmpfile_path = tmpfile.name
 
-    # Zapisz do tymczasowego pliku
-    with tempfile.NamedTemporaryFile(delete=False, mode="w") as tmpfile:
-        tmpfile.write(updated_cron)
-        tmpfile_path = tmpfile.name
+subprocess.run(["crontab", tmpfile_path])
+os.unlink(tmpfile_path)
 
-    # Załaduj nowy crontab
-    subprocess.run(["crontab", "-u", user, tmpfile_path])
-
-    print(f"✅ Crontab zaktualizowany dla użytkownika: {user}")
-    os.unlink(tmpfile_path)
+print(f"✅ Crontab zaktualizowany dla użytkownika: {CURRENT_USER}")
