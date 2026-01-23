@@ -1,89 +1,585 @@
-import json
-import uuid
-import time
-import requests
-import websocket  # pip install websocket-client
+import re
+import traceback
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
-HUB = "https://twoj-hub.example.com"
-USER = "jan"
-TOKEN = "PASTE_TOKEN_HERE"
+import pandas as pd
+import streamlit as st
+import sqlglot
 
-# 1) Start serwera użytkownika (JupyterHub REST)
-r = requests.post(
-    f"{HUB}/hub/api/users/{USER}/server",
-    headers={"Authorization": f"token {TOKEN}"},
-)
-# 201/202/409 są typowe (409 = już działa)
-if r.status_code not in (201, 202, 409):
-    raise RuntimeError(f"Start server failed: {r.status_code} {r.text}")
+import oracledb
+import snowflake.connector
 
-# 2) Poczekaj aż single-user server zacznie odpowiadać
-USER_BASE = f"{HUB}/user/{USER}"
-for _ in range(60):
-    try:
-        rr = requests.get(f"{USER_BASE}/api", params={"token": TOKEN}, timeout=2)
-        if rr.status_code == 200:
-            break
-    except requests.RequestException:
-        pass
-    time.sleep(1)
-else:
-    raise RuntimeError("User server not ready")
-
-# 3) Utwórz kernel (Jupyter Server REST)
-kr = requests.post(f"{USER_BASE}/api/kernels", params={"token": TOKEN})
-kr.raise_for_status()
-kernel_id = kr.json()["id"]
-print("kernel:", kernel_id)
-
-# 4) Połącz się WebSocketem do kanałów kernela i wyślij execute_request
-ws_url = f"{USER_BASE.replace('https://','wss://').replace('http://','ws://')}/api/kernels/{kernel_id}/channels?token={TOKEN}"
-ws = websocket.create_connection(ws_url)
-
-msg_id = uuid.uuid4().hex
-execute = {
-    "header": {
-        "msg_id": msg_id,
-        "username": USER,
-        "session": uuid.uuid4().hex,
-        "msg_type": "execute_request",
-        "version": "5.3",
-    },
-    "parent_header": {},
-    "metadata": {},
-    "content": {
-        "code": "print('xd')",
-        "silent": False,
-        "store_history": True,
-        "user_expressions": {},
-        "allow_stdin": False,
-        "stop_on_error": True,
-    },
-    "channel": "shell",
-    "buffers": [],
+# =========================
+# HARD-CODED CONFIG (DEV ONLY)
+# =========================
+ORACLE_CONFIG = {
+    "user": "",
+    "password": "",
+    "dsn": "",
 }
 
-ws.send(json.dumps(execute))
+SNOWFLAKE_CONFIG = {
+    "user": "",
+    "password": "",
+    "account": "",
+    "warehouse": "",
+    "database": "",
+    "schema": "",
+    "role": "",  # optional
+}
 
-# 5) Odbierz output z iopub (szukamy stream/text i execute_reply)
-got_reply = False
-while True:
-    raw = ws.recv()
-    m = json.loads(raw)
+# =========================
+# ORACLE DB PREFIX -> SNOWFLAKE DB.SCHEMA REMAP
+# =========================
+# Oracle refs like: HRT_100_DEV.ORDERS, HDB_99_XYZ.V_TABLE etc.
+ORACLE_DB_PREFIX_REGEX = re.compile(r"\b[A-Z]{2,5}_[A-Z0-9]+_[A-Z0-9]+\.", re.IGNORECASE)
 
-    msg_type = m.get("header", {}).get("msg_type")
-    channel = m.get("channel")
+# You decided to map to DB.SCHEMA prefix:
+SNOWFLAKE_DB_SCHEMA_PREFIX = "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000"
+SNOWFLAKE_DB_SCHEMA_REGEX = re.compile(rf"\b{re.escape(SNOWFLAKE_DB_SCHEMA_PREFIX)}\.", re.IGNORECASE)
 
-    if channel == "iopub" and msg_type == "stream":
-        print(m["content"].get("text", ""), end="")   # powinno wypisać: xd
+DEFAULT_ORACLE_PREFIX_BACK = "HRT_100_DEV"
 
-    if channel == "shell" and msg_type == "execute_reply":
-        got_reply = True
+# =========================
+# PARAMETER HANDLING
+# =========================
+# Oracle-style placeholders you mentioned:
+#   &hrt_date  (SQL Developer substitution / popup)
+#   :p_date    (bind)
+#   :ids       (bind)
+#
+# We will:
+# - Extract names from both &name and :name
+# - Translate to Snowflake session vars:
+#     SET P_DATE = <value>;
+#     ... WHERE col = $P_DATE
+#
+# Notes:
+# - We intentionally DO NOT try to parse complex expressions; only replace the placeholder tokens.
 
-    if got_reply and channel == "iopub" and msg_type == "status" and m["content"].get("execution_state") == "idle":
-        break
+RE_ORACLE_AMP = re.compile(r"(?<!&)&([A-Za-z_][A-Za-z0-9_]*)")     # &name (not &&)
+RE_ORACLE_COLON = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")  # :name (not ::)
 
-ws.close()
+def extract_oracle_params(sql: str) -> List[str]:
+    names = set()
+    for m in RE_ORACLE_AMP.finditer(sql):
+        names.add(m.group(1).upper())
+    for m in RE_ORACLE_COLON.finditer(sql):
+        names.add(m.group(1).upper())
+    return sorted(names)
 
-# (opcjonalnie) stop kernela:
-requests.delete(f"{USER_BASE}/api/kernels/{kernel_id}", params={"token": TOKEN})
+def oracle_to_oracle_bind_sql(sql: str) -> str:
+    # Convert &name -> :name so pd.read_sql_query(..., params=...) can work
+    # Keep original :name intact.
+    return RE_ORACLE_AMP.sub(lambda m: f":{m.group(1)}", sql)
+
+def oracle_params_to_snowflake_vars(sql: str) -> str:
+    # Replace &name and :name with $NAME
+    out = RE_ORACLE_AMP.sub(lambda m: f"${m.group(1).upper()}", sql)
+    out = RE_ORACLE_COLON.sub(lambda m: f"${m.group(1).upper()}", out)
+    return out
+
+def snowflake_vars_to_oracle_bind(sql: str) -> str:
+    # Reverse helper if needed: $NAME -> :name
+    # (Used only if you want to go Snowflake -> Oracle and keep bind style.)
+    return re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*)", lambda m: f":{m.group(1).lower()}", sql)
+
+def build_snowflake_set_preamble(param_names: List[str]) -> str:
+    # Generates editable preamble for Snowsight:
+    # SET P_DATE = NULL;
+    # SET IDS = NULL;
+    # Query uses $P_DATE, $IDS, etc.
+    if not param_names:
+        return ""
+    lines = ["-- Parameters (edit values before running):"]
+    for p in param_names:
+        lines.append(f"SET {p} = NULL;")
+    return "\n".join(lines) + "\n\n"
+
+def params_list_to_dict(params_rows: List[Dict]) -> Dict[str, str]:
+    # rows: [{"name":"P_DATE","value":"2025-01-01"}, ...]
+    out = {}
+    for r in params_rows:
+        name = str(r.get("name", "")).strip()
+        if not name:
+            continue
+        out[name.upper()] = str(r.get("value", "")).strip()
+    return out
+
+# =========================
+# DB REMAP HELPERS
+# =========================
+def remap_oracle_to_snowflake(sql: str) -> str:
+    return ORACLE_DB_PREFIX_REGEX.sub(f"{SNOWFLAKE_DB_SCHEMA_PREFIX}.", sql)
+
+def remap_snowflake_to_oracle(sql: str, oracle_prefix: str) -> str:
+    return SNOWFLAKE_DB_SCHEMA_REGEX.sub(f"{oracle_prefix}.", sql)
+
+# =========================
+# CONNECTIONS (CACHED)
+# =========================
+@st.cache_resource
+def oracle_conn():
+    return oracledb.connect(
+        user=ORACLE_CONFIG["user"],
+        password=ORACLE_CONFIG["password"],
+        dsn=ORACLE_CONFIG["dsn"],
+    )
+
+@st.cache_resource
+def snowflake_conn():
+    return snowflake.connector.connect(
+        user=SNOWFLAKE_CONFIG["user"],
+        password=SNOWFLAKE_CONFIG["password"],
+        account=SNOWFLAKE_CONFIG["account"],
+        warehouse=SNOWFLAKE_CONFIG["warehouse"],
+        database=SNOWFLAKE_CONFIG["database"],
+        schema=SNOWFLAKE_CONFIG["schema"],
+        role=SNOWFLAKE_CONFIG.get("role"),
+        client_session_keep_alive=True,
+    )
+
+# =========================
+# RUNNERS (with params)
+# =========================
+def run_oracle_sql(sql: str, params: Dict[str, str]) -> pd.DataFrame:
+    sql_for_exec = oracle_to_oracle_bind_sql(sql)
+    # oracledb + pandas expects param names case-insensitive; keep as provided
+    return pd.read_sql_query(sql_for_exec, oracle_conn(), params=params)
+
+def _snowflake_set_vars(conn, params: Dict[str, str]):
+    # Use server-side SET. Values are injected as query params (qmark) to avoid quoting issues.
+    # If user leaves empty -> NULL.
+    with conn.cursor() as cur:
+        for name, value in params.items():
+            name_u = name.upper()
+            if value == "":
+                cur.execute(f"SET {name_u} = NULL")
+            else:
+                # SET VAR = '...'; but bind safely:
+                cur.execute(f"SET {name_u} = ?", (value,))
+
+def run_snowflake_sql(sql: str, params: Dict[str, str]) -> pd.DataFrame:
+    conn = snowflake_conn()
+    _snowflake_set_vars(conn, params)
+    return pd.read_sql_query(sql, conn)
+
+# =========================
+# TRANSLATION (Oracle -> Snowflake with params + remap)
+# =========================
+def translate_oracle_to_snowflake(sql: str) -> Tuple[str, List[str]]:
+    # 1) collect params from Oracle (both & and :)
+    param_names = extract_oracle_params(sql)
+
+    # 2) remap DB prefixes (Oracle prefix -> Snowflake DB.SCHEMA)
+    sql2 = remap_oracle_to_snowflake(sql)
+
+    # 3) translate dialect with sqlglot
+    snow = sqlglot.transpile(sql2, read="oracle", write="snowflake", pretty=True)[0]
+
+    # 4) convert placeholders to Snowflake session vars ($NAME)
+    snow = oracle_params_to_snowflake_vars(snow)
+
+    # 5) optional preamble for Snowsight
+    snow = build_snowflake_set_preamble(param_names) + snow
+    return snow, param_names
+
+def translate_snowflake_to_oracle(sql: str, oracle_prefix_back: str) -> str:
+    # This keeps it simple:
+    # 1) dialect translate
+    out = sqlglot.transpile(sql, read="snowflake", write="oracle", pretty=True)[0]
+    # 2) remap DB.SCHEMA -> ORACLE_PREFIX
+    out = remap_snowflake_to_oracle(out, oracle_prefix_back)
+    # 3) optionally convert $VARS -> :vars (so it can be used with pandas params)
+    out = snowflake_vars_to_oracle_bind(out)
+    return out
+
+# ============================================================
+# FOLDER SCAN (TAB 2)
+# ============================================================
+ORACLE_REF_REGEX = re.compile(
+    r"\b[A-Z]{2,5}_[A-Z0-9]+_[A-Z0-9]+\.(?:V_[A-Z0-9_]+|[A-Z0-9_]+)\b",
+    re.IGNORECASE,
+)
+
+def scan_sql_folder(folder_path: str, recursive: bool = True):
+    base = Path(folder_path)
+    if not base.exists() or not base.is_dir():
+        raise ValueError(f"To nie jest poprawny katalog: {folder_path}")
+    pattern = "**/*.sql" if recursive else "*.sql"
+    results = []
+    for p in base.glob(pattern):
+        if not p.is_file():
+            continue
+        txt = p.read_text(encoding="utf-8", errors="ignore")
+        matches = ORACLE_REF_REGEX.findall(txt)
+        if matches:
+            results.append(
+                {
+                    "path": str(p),
+                    "name": p.name,
+                    "count": len(matches),
+                    "refs": sorted(set(matches))[:100],
+                    "params": extract_oracle_params(txt),
+                }
+            )
+    results.sort(key=lambda x: (-x["count"], x["path"]))
+    return results
+
+# ============================================================
+# PARAM EDITOR
+# ============================================================
+def render_params_editor(state_key_rows: str, detected_params: Optional[List[str]] = None):
+    if state_key_rows not in st.session_state:
+        st.session_state[state_key_rows] = []
+    # seed if empty
+    if detected_params and not st.session_state[state_key_rows]:
+        st.session_state[state_key_rows] = [{"name": p, "value": ""} for p in detected_params]
+
+    df = pd.DataFrame(st.session_state[state_key_rows] or [{"name": "", "value": ""}])
+    edited = st.data_editor(
+        df,
+        use_container_width=True,
+        num_rows="dynamic",
+        hide_index=True,
+        column_config={
+            "name": st.column_config.TextColumn("name"),
+            "value": st.column_config.TextColumn("value"),
+        },
+        key=f"editor_{state_key_rows}",
+    )
+    st.session_state[state_key_rows] = edited.to_dict(orient="records")
+
+# ============================================================
+# STREAMLIT APP
+# ============================================================
+st.set_page_config(page_title="Oracle ↔ Snowflake SQL Migration", layout="wide")
+tabs = st.tabs(["Edytor", "Folder .sql"])
+
+# ============================================================
+# TAB 0 (simple editor)
+# ============================================================
+with tabs[0]:
+    st.title("Oracle ↔ Snowflake SQL Migration Tool")
+
+    # state init
+    if "oracle_sql_text" not in st.session_state:
+        st.session_state.oracle_sql_text = "SELECT * FROM HRT_100_DEV.ORDERS WHERE ORDERDATE >= :p_date"
+    if "snowflake_sql_text" not in st.session_state:
+        st.session_state.snowflake_sql_text = "SELECT * FROM SNOWFLAKE_SAMPLE_DATA.TPCH_SF1000.ORDERS LIMIT 5"
+
+    if "oracle_df" not in st.session_state:
+        st.session_state.oracle_df = None
+    if "snowflake_df" not in st.session_state:
+        st.session_state.snowflake_df = None
+
+    if "oracle_err" not in st.session_state:
+        st.session_state.oracle_err = None
+    if "snowflake_err" not in st.session_state:
+        st.session_state.snowflake_err = None
+    if "translate_err" not in st.session_state:
+        st.session_state.translate_err = None
+
+    if "oracle_prefix_back" not in st.session_state:
+        st.session_state.oracle_prefix_back = DEFAULT_ORACLE_PREFIX_BACK
+
+    # layout
+    left, mid, right = st.columns([5, 1, 5], gap="large")
+
+    with mid:
+        st.subheader(" ")
+        st.session_state.oracle_prefix_back = st.text_input(
+            "Snowflake → Oracle prefix",
+            value=st.session_state.oracle_prefix_back,
+        )
+        to_sf = st.button("➡", use_container_width=True)
+        to_oracle = st.button("⬅", use_container_width=True)
+
+    # handle translate BEFORE text_area widgets
+    if to_sf:
+        try:
+            st.session_state.translate_err = None
+            snow, detected = translate_oracle_to_snowflake(st.session_state.oracle_sql_text)
+            st.session_state.snowflake_sql_text = snow
+            # seed params for snowflake run (tab0)
+            if "params_tab0" not in st.session_state or not st.session_state["params_tab0"]:
+                st.session_state["params_tab0"] = [{"name": p, "value": ""} for p in detected]
+        except Exception as e:
+            st.session_state.translate_err = str(e)
+
+    if to_oracle:
+        try:
+            st.session_state.translate_err = None
+            out = translate_snowflake_to_oracle(st.session_state.snowflake_sql_text, st.session_state.oracle_prefix_back)
+            st.session_state.oracle_sql_text = out
+        except Exception as e:
+            st.session_state.translate_err = str(e)
+
+    with left:
+        st.subheader("Oracle SQL")
+        st.text_area(label="", key="oracle_sql_text", height=260)
+
+    with right:
+        st.subheader("Snowflake SQL")
+        st.text_area(label="", key="snowflake_sql_text", height=260)
+
+    with mid:
+        if st.session_state.translate_err:
+            st.error(st.session_state.translate_err)
+
+    # params editor (tab0)
+    detected0 = extract_oracle_params(st.session_state.oracle_sql_text)
+    with st.expander("Parametry", expanded=True):
+        render_params_editor("params_tab0", detected_params=detected0)
+
+    # run buttons
+    b1, _, b2 = st.columns([5, 1, 5], gap="large")
+    with b1:
+        run_oracle = st.button("Run Oracle", type="primary", use_container_width=True, key="run_oracle_tab0")
+    with b2:
+        run_snowflake = st.button("Run Snowflake", type="primary", use_container_width=True, key="run_snowflake_tab0")
+
+    # execution
+    if run_oracle:
+        st.session_state.oracle_err = None
+        st.session_state.oracle_df = None
+        try:
+            params = params_list_to_dict(st.session_state.get("params_tab0", []))
+            # Oracle uses :name, so we keep dict keys; value strings passed as-is
+            st.session_state.oracle_df = run_oracle_sql(st.session_state.oracle_sql_text, params)
+        except Exception:
+            st.session_state.oracle_err = traceback.format_exc()
+
+    if run_snowflake:
+        st.session_state.snowflake_err = None
+        st.session_state.snowflake_df = None
+        try:
+            params = params_list_to_dict(st.session_state.get("params_tab0", []))
+            st.session_state.snowflake_df = run_snowflake_sql(st.session_state.snowflake_sql_text, params)
+        except Exception:
+            st.session_state.snowflake_err = traceback.format_exc()
+
+    # results
+    res1, res2 = st.columns(2, gap="large")
+    with res1:
+        st.subheader("Oracle result")
+        if st.session_state.oracle_err:
+            st.error(st.session_state.oracle_err)
+        elif isinstance(st.session_state.oracle_df, pd.DataFrame):
+            st.dataframe(st.session_state.oracle_df, use_container_width=True)
+        else:
+            st.info("Brak wyniku. Kliknij Run Oracle.")
+
+    with res2:
+        st.subheader("Snowflake result")
+        if st.session_state.snowflake_err:
+            st.error(st.session_state.snowflake_err)
+        elif isinstance(st.session_state.snowflake_df, pd.DataFrame):
+            st.dataframe(st.session_state.snowflake_df, use_container_width=True)
+        else:
+            st.info("Brak wyniku. Kliknij Run Snowflake.")# ============================================================
+# TAB 1 (folder)
+# ============================================================
+with tabs[1]:
+    st.subheader("Folder .sql (Tab 1)")
+
+    # ---- State init ----
+    st.session_state.setdefault("scan_folder", str(Path.cwd()))
+    st.session_state.setdefault("scan_recursive", True)
+    st.session_state.setdefault("scan_results", [])
+    st.session_state.setdefault("selected_path", None)
+
+    # IMPORTANT:
+    # We store the CURRENT editor contents in these keys (these are the text_area keys).
+    # Running must ALWAYS read from these keys.
+    st.session_state.setdefault("oracle_sql_text_2", "")
+    st.session_state.setdefault("snowflake_sql_text_2", "")
+
+    st.session_state.setdefault("params_tab1", [])
+    st.session_state.setdefault("oracle_df_2", None)
+    st.session_state.setdefault("snowflake_df_2", None)
+    st.session_state.setdefault("oracle_err_2", None)
+    st.session_state.setdefault("snowflake_err_2", None)
+    st.session_state.setdefault("translate_err_2", None)
+    st.session_state.setdefault("file_err_2", None)
+
+    # ---- Scan controls ----
+    c1, c2, c3 = st.columns([6, 2, 2], gap="large")
+    with c1:
+        st.session_state.scan_folder = st.text_input("Folder", value=st.session_state.scan_folder, key="scan_folder_in")
+    with c2:
+        st.session_state.scan_recursive = st.checkbox("Rekurencyjnie", value=st.session_state.scan_recursive, key="scan_rec_in")
+    with c3:
+        do_scan = st.button("Skanuj", type="primary", use_container_width=True, key="scan_btn_tab1")
+
+    if do_scan:
+        try:
+            st.session_state.file_err_2 = None
+            st.session_state.scan_results = scan_sql_folder(
+                st.session_state.scan_folder,
+                recursive=st.session_state.scan_recursive,
+            )
+        except Exception:
+            st.session_state.file_err_2 = traceback.format_exc()
+
+    if st.session_state.file_err_2:
+        st.error(st.session_state.file_err_2)
+
+    results = st.session_state.scan_results
+    st.write(f"Znalezione pliki: **{len(results)}**")
+    if not results:
+        st.stop()
+
+    # ---- File picker ----
+    file_labels = [f"{r['name']} (refs:{r['count']}) — {r['path']}" for r in results]
+    selected_label = st.selectbox(
+        "Pliki",
+        options=["(wybierz)"] + file_labels,
+        index=0,
+        key="file_select_tab1",
+    )
+
+    # ---- Buttons (actions BEFORE text_area) ----
+    load_clicked = to_sf_clicked = overwrite_clicked = False
+    run_oracle_clicked = run_snowflake_clicked = False
+
+    selected_path = None
+    detected_params = []
+
+    if selected_label != "(wybierz)":
+        idx = file_labels.index(selected_label)
+        selected_path = results[idx]["path"]
+        detected_params = results[idx].get("params", [])
+        st.session_state.selected_path = selected_path
+
+        a1, a2, a3, a4, a5 = st.columns([2, 1, 2, 2, 2], gap="large")
+        with a1:
+            load_clicked = st.button("Wczytaj", use_container_width=True, key="load_file_tab1")
+        with a2:
+            to_sf_clicked = st.button("➡", use_container_width=True, key="to_sf_tab1")
+        with a3:
+            overwrite_clicked = st.button("Nadpisz plik (Snowflake)", type="primary", use_container_width=True, key="overwrite_tab1")
+        with a4:
+            run_oracle_clicked = st.button("Run Oracle", use_container_width=True, key="run_oracle_tab1")
+        with a5:
+            run_snowflake_clicked = st.button("Run Snowflake", use_container_width=True, key="run_snowflake_tab1")
+
+        with st.expander("Refs (unikalne)", expanded=False):
+            st.write(results[idx]["refs"])
+
+        # ---- Actions ----
+        if load_clicked:
+            try:
+                st.session_state.file_err_2 = None
+                st.session_state.translate_err_2 = None
+                txt = Path(selected_path).read_text(encoding="utf-8", errors="ignore")
+
+                # CRITICAL: write into the SAME keys that text_area uses.
+                st.session_state.oracle_sql_text_2 = txt
+                st.session_state.snowflake_sql_text_2 = ""
+
+                # seed params (do not overwrite if user already set some)
+                if not st.session_state.params_tab1:
+                    st.session_state.params_tab1 = [{"name": p, "value": ""} for p in detected_params]
+
+                # clear old results
+                st.session_state.oracle_df_2 = None
+                st.session_state.snowflake_df_2 = None
+            except Exception:
+                st.session_state.file_err_2 = traceback.format_exc()
+
+        if to_sf_clicked:
+            try:
+                st.session_state.translate_err_2 = None
+                snow, detected = translate_oracle_to_snowflake(st.session_state.oracle_sql_text_2)
+                st.session_state.snowflake_sql_text_2 = snow
+                if not st.session_state.params_tab1:
+                    st.session_state.params_tab1 = [{"name": p, "value": ""} for p in detected]
+            except Exception as e:
+                st.session_state.translate_err_2 = str(e)
+
+        if overwrite_clicked:
+            try:
+                st.session_state.file_err_2 = None
+                if not selected_path:
+                    raise ValueError("Brak wybranego pliku.")
+
+                # if snowflake textbox empty -> convert current ORACLE TEXTBOX (not file)
+                if not st.session_state.snowflake_sql_text_2.strip():
+                    snow, detected = translate_oracle_to_snowflake(st.session_state.oracle_sql_text_2)
+                    st.session_state.snowflake_sql_text_2 = snow
+                    if not st.session_state.params_tab1:
+                        st.session_state.params_tab1 = [{"name": p, "value": ""} for p in detected]
+
+                p = Path(selected_path)
+                bak = p.with_suffix(p.suffix + ".bak")
+                if not bak.exists():
+                    bak.write_text(p.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+
+                # CRITICAL: write the CURRENT snowflake textbox content
+                p.write_text(st.session_state.snowflake_sql_text_2, encoding="utf-8")
+                st.success(f"Nadpisano. Backup: {bak.name}")
+            except Exception:
+                st.session_state.file_err_2 = traceback.format_exc()
+
+        # CRITICAL FIX:
+        # RUN must always use current textbox value (st.session_state.oracle_sql_text_2 / snowflake_sql_text_2),
+        # never reread from file.
+        if run_oracle_clicked:
+            st.session_state.oracle_err_2 = None
+            st.session_state.oracle_df_2 = None
+            try:
+                params = params_list_to_dict(st.session_state.params_tab1)
+                st.session_state.oracle_df_2 = run_oracle_sql(st.session_state.oracle_sql_text_2, params)
+            except Exception:
+                st.session_state.oracle_err_2 = traceback.format_exc()
+
+        if run_snowflake_clicked:
+            st.session_state.snowflake_err_2 = None
+            st.session_state.snowflake_df_2 = None
+            try:
+                params = params_list_to_dict(st.session_state.params_tab1)
+                st.session_state.snowflake_df_2 = run_snowflake_sql(st.session_state.snowflake_sql_text_2, params)
+            except Exception:
+                st.session_state.snowflake_err_2 = traceback.format_exc()
+
+    # ---- Editors (text areas) ----
+    # IMPORTANT: these keys are the single source of truth for what gets executed.
+    left, mid, right = st.columns([5, 1, 5], gap="large")
+    with left:
+        st.subheader("Oracle SQL (edytowalne)")
+        st.text_area(label="", key="oracle_sql_text_2", height=240)
+    with right:
+        st.subheader("Snowflake SQL (edytowalne)")
+        st.text_area(label="", key="snowflake_sql_text_2", height=240)
+    with mid:
+        if st.session_state.translate_err_2:
+            st.error(st.session_state.translate_err_2)
+        if st.session_state.file_err_2:
+            st.error(st.session_state.file_err_2)
+
+    # ---- Params editor ----
+    with st.expander("Parametry", expanded=True):
+        detected_live = extract_oracle_params(st.session_state.oracle_sql_text_2)
+        render_params_editor("params_tab1", detected_params=detected_live)
+
+    # ---- Results ----
+    r1, r2 = st.columns(2, gap="large")
+    with r1:
+        st.subheader("Oracle result")
+        if st.session_state.oracle_err_2:
+            st.error(st.session_state.oracle_err_2)
+        elif isinstance(st.session_state.oracle_df_2, pd.DataFrame):
+            st.dataframe(st.session_state.oracle_df_2, use_container_width=True)
+        else:
+            st.info("Brak wyniku (Run Oracle).")
+
+    with r2:
+        st.subheader("Snowflake result")
+        if st.session_state.snowflake_err_2:
+            st.error(st.session_state.snowflake_err_2)
+        elif isinstance(st.session_state.snowflake_df_2, pd.DataFrame):
+            st.dataframe(st.session_state.snowflake_df_2, use_container_width=True)
+        else:
+            st.info("Brak wyniku (Run Snowflake).")
