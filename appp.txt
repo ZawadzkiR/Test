@@ -104,6 +104,8 @@ ORACLE_REF_REGEX = re.compile(
 RE_ORACLE_AMP = re.compile(r"(?<!&) &([A-Za-z_][A-Za-z0-9_]*)", re.VERBOSE)
 RE_ORACLE_COLON = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 RE_ORACLE_AMP_FALLBACK = re.compile(r"(?<!&)&([A-Za-z_][A-Za-z0-9_]*)")
+RE_SNOWFLAKE_VAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+RE_UNCOMMENTED_SET_LINE = re.compile(r"^\s*SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*=", re.IGNORECASE)
 
 REMOTE_ROOT = Path(REMOTE_VERSION_DIR)
 REMOTE_VERSION_PATH = REMOTE_ROOT / "version.json"
@@ -327,11 +329,41 @@ class ConnectionBar(QGroupBox):
         self.disconnect_btn.setEnabled(False)
 
 
+class CollapsibleSection(QWidget):
+    def __init__(self, title: str, content: QWidget, expanded: bool = False, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.toggle_btn = QToolButton(self)
+        self.toggle_btn.setText(title)
+        self.toggle_btn.setCheckable(True)
+        self.toggle_btn.setChecked(expanded)
+        self.toggle_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle_btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.toggle_btn.clicked.connect(self._on_toggled)
+        self.content = content
+        self.content.setVisible(expanded)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self.toggle_btn)
+        layout.addWidget(self.content)
+
+    def _on_toggled(self, checked: bool):
+        self.toggle_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        self.content.setVisible(checked)
+
+
 class LargeEditorDialog(QDialog):
     def __init__(self, title: str, text: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.resize(1500, 900)
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+            width = max(900, int(geo.width() * 0.78))
+            height = max(650, int(geo.height() * 0.78))
+            self.resize(width, height)
+        else:
+            self.resize(1200, 800)
         layout = QVBoxLayout(self)
         self.editor = QPlainTextEdit(self)
         self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
@@ -641,7 +673,8 @@ class SqlMigrationWindow(QMainWindow):
         opt_layout.addWidget(self.sf_target_db)
         opt_layout.addWidget(QLabel("Schema context:"))
         opt_layout.addWidget(self.sf_target_schema)
-        layout.addWidget(options_box)
+        self.editor_options_section = CollapsibleSection("Opcje tłumaczenia", options_box, expanded=False)
+        layout.addWidget(self.editor_options_section)
 
         top_buttons = QHBoxLayout()
         self.btn_to_sf = QPushButton("Oracle → Snowflake")
@@ -765,14 +798,22 @@ class SqlMigrationWindow(QMainWindow):
         self.folder_progress = QProgressBar()
         self.folder_progress.setRange(0, 0)
         self.folder_progress.setVisible(False)
-        right_layout.addLayout(btn_row)
-        right_layout.addWidget(self.folder_progress_label)
-        right_layout.addWidget(self.folder_progress)
+        folder_actions_widget = QWidget()
+        folder_actions_layout = QVBoxLayout(folder_actions_widget)
+        folder_actions_layout.setContentsMargins(0, 0, 0, 0)
+        folder_actions_layout.setSpacing(4)
+        folder_actions_layout.addLayout(btn_row)
+        folder_actions_layout.addWidget(self.folder_progress_label)
+        folder_actions_layout.addWidget(self.folder_progress)
+        self.folder_actions_section = CollapsibleSection("Akcje i uruchamianie", folder_actions_widget, expanded=True)
+        right_layout.addWidget(self.folder_actions_section)
 
         self.file_refs = QTextEdit()
         self.file_refs.setReadOnly(True)
         self.file_refs.setPlaceholderText("Znalezione referencje z pliku")
-        right_layout.addWidget(self.file_refs)
+        self.file_refs.setMinimumHeight(120)
+        self.refs_section = CollapsibleSection("Refs / Parametry", self.file_refs, expanded=False)
+        right_layout.addWidget(self.refs_section)
 
         self.folder_dual_splitter = QSplitter(Qt.Horizontal)
         self.folder_dual_splitter.setChildrenCollapsible(False)
@@ -1159,16 +1200,71 @@ class SqlMigrationWindow(QMainWindow):
         except Exception:
             QMessageBox.critical(self, "Tłumaczenie", traceback.format_exc())
 
+    def _extract_explicit_set_vars(self, sql: str) -> Dict[str, str]:
+        values: Dict[str, str] = {}
+        for raw_line in (sql or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("--"):
+                continue
+            match = RE_UNCOMMENTED_SET_LINE.match(line)
+            if not match:
+                continue
+            name = match.group(1).upper()
+            value_part = re.sub(r"^\s*SET\s+[A-Za-z_][A-Za-z0-9_]*\s*=", "", line, flags=re.IGNORECASE).strip()
+            value_part = re.sub(r";\s*$", "", value_part).strip()
+            values[name] = value_part
+        return values
+
+    def _split_sql_statements(self, sql: str) -> List[str]:
+        statements: List[str] = []
+        buf: List[str] = []
+        in_single = False
+        in_double = False
+        i = 0
+        text = sql or ""
+        while i < len(text):
+            ch = text[i]
+            nxt = text[i + 1] if i + 1 < len(text) else ""
+            if not in_double and ch == "'":
+                if in_single and nxt == "'":
+                    buf.append(ch)
+                    buf.append(nxt)
+                    i += 2
+                    continue
+                in_single = not in_single
+                buf.append(ch)
+            elif not in_single and ch == '"':
+                in_double = not in_double
+                buf.append(ch)
+            elif not in_single and not in_double and ch == '-' and nxt == '-':
+                while i < len(text) and text[i] != "\n":
+                    buf.append(text[i])
+                    i += 1
+                continue
+            elif not in_single and not in_double and ch == ';':
+                stmt = ''.join(buf).strip()
+                if stmt:
+                    statements.append(stmt)
+                buf = []
+            else:
+                buf.append(ch)
+            i += 1
+        tail = ''.join(buf).strip()
+        if tail:
+            statements.append(tail)
+        return statements
+
     # -------- parameter helpers --------
     def _extract_live_params(self, sql: str) -> List[str]:
         seen = []
+        explicit_set_vars = set(self._extract_explicit_set_vars(sql).keys())
         for name in extract_oracle_params(sql) or []:
             upper = str(name).upper()
             if upper not in seen:
                 seen.append(upper)
         for name in extract_snowflake_variable_names(sql) or []:
             upper = str(name).upper()
-            if upper not in seen:
+            if upper not in explicit_set_vars and upper not in seen:
                 seen.append(upper)
         for rx in (RE_ORACLE_AMP_FALLBACK, RE_ORACLE_COLON):
             for m in rx.finditer(sql or ""):
@@ -1182,6 +1278,11 @@ class SqlMigrationWindow(QMainWindow):
         if not names:
             return {}
         dlg = ParamsDialog(names, self)
+        explicit_set_vars = self._extract_explicit_set_vars(sql)
+        for key, value in explicit_set_vars.items():
+            widget = dlg._inputs.get(key)
+            if widget is not None:
+                widget.setText(value)
         if dlg.exec() != QDialog.Accepted:
             return None
         return dlg.values()
@@ -1281,9 +1382,13 @@ class SqlMigrationWindow(QMainWindow):
                 target_database=self._conn_sf_database(conn),
                 target_schema=self._conn_sf_schema_qualified(conn),
             )
-        out = self._strip_set_statements(out)
+        explicit_set_vars = self._extract_explicit_set_vars(out)
         out = oracle_params_to_snowflake_vars(out)
-        replacements = self._build_snowflake_replacements(params)
+        if explicit_set_vars:
+            filtered_params = {k: v for k, v in (params or {}).items() if str(k).upper() not in explicit_set_vars}
+        else:
+            filtered_params = params
+        replacements = self._build_snowflake_replacements(filtered_params)
         for token, value in replacements.items():
             out = out.replace(token, value)
         return self._clean_sql_for_execution(out)
@@ -1326,29 +1431,46 @@ class SqlMigrationWindow(QMainWindow):
         self._active_snowflake_query_id = None
         try:
             exec_sql = self._prepare_snowflake_sql_for_execution(conn, sql, params)
-            cur = conn.cursor()
-            self._active_snowflake_exec_cursor = cur
-            try:
-                cur.execute_async(exec_sql)
-                self._active_snowflake_query_id = getattr(cur, "sfqid", None)
-                if not self._active_snowflake_query_id:
-                    cur.execute(exec_sql)
-                    return self._fetch_dataframe_from_cursor(cur)
+            statements = self._split_sql_statements(exec_sql)
+            if not statements:
+                return pd.DataFrame()
 
-                while True:
-                    status = conn.get_query_status_throw_if_error(self._active_snowflake_query_id)
-                    if not conn.is_still_running(status):
-                        break
-                    time.sleep(0.25)
+            last_df: Optional[pd.DataFrame] = None
+            last_status_df: Optional[pd.DataFrame] = None
 
-                cur.get_results_from_sfqid(self._active_snowflake_query_id)
-                return self._fetch_dataframe_from_cursor(cur)
-            finally:
+            for stmt in statements:
+                cur = conn.cursor()
+                self._active_snowflake_exec_cursor = cur
                 try:
-                    cur.close()
+                    cur.execute_async(stmt)
+                    self._active_snowflake_query_id = getattr(cur, "sfqid", None)
+                    if self._active_snowflake_query_id:
+                        while True:
+                            status = conn.get_query_status_throw_if_error(self._active_snowflake_query_id)
+                            if not conn.is_still_running(status):
+                                break
+                            time.sleep(0.25)
+                        cur.get_results_from_sfqid(self._active_snowflake_query_id)
+                    else:
+                        cur.execute(stmt)
+
+                    fetched = self._fetch_dataframe_from_cursor(cur)
+                    if cur.description:
+                        last_df = fetched
+                    else:
+                        last_status_df = fetched
                 finally:
-                    self._active_snowflake_exec_cursor = None
-                    self._active_snowflake_query_id = None
+                    try:
+                        cur.close()
+                    finally:
+                        self._active_snowflake_exec_cursor = None
+                        self._active_snowflake_query_id = None
+
+            if last_df is not None:
+                return last_df
+            if last_status_df is not None:
+                return last_status_df
+            return pd.DataFrame()
         finally:
             self._active_snowflake_exec_conn = None
             conn.close()
