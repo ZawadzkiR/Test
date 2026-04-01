@@ -1,0 +1,1667 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import traceback
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+import pandas as pd
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QRunnable, Qt, QThreadPool, Signal, QTimer
+from PySide6.QtGui import QAction, QFont, QColor, QTextCharFormat, QSyntaxHighlighter
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHeaderView,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QPlainTextEdit,
+    QProgressDialog,
+    QSizePolicy,
+    QSplitter,
+    QStatusBar,
+    QTabWidget,
+    QTableView,
+    QTextEdit,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+import oracledb
+import snowflake.connector
+
+try:
+    from snowflakedb import (
+        extract_oracle_params,
+        extract_snowflake_variable_names,
+        oracle_params_to_snowflake_vars,
+        oracle_to_oracle_bind_sql,
+        read_sql as snowflake_read_sql,
+        remap_oracle_to_snowflake,
+        snf_tr,
+        snowflakedb as SnowflakeDbDriver,
+    )
+except Exception:
+    try:
+        from snowflakedb_custom.snowflakedb import (
+            extract_oracle_params,
+            extract_snowflake_variable_names,
+            oracle_params_to_snowflake_vars,
+            oracle_to_oracle_bind_sql,
+            read_sql as snowflake_read_sql,
+            remap_oracle_to_snowflake,
+            snf_tr,
+            snowflakedb as SnowflakeDbDriver,
+        )
+    except Exception:
+        # fallback if package files are placed directly next to app
+        from snowflakedb import (
+            extract_oracle_params,
+            extract_snowflake_variable_names,
+            oracle_params_to_snowflake_vars,
+            oracle_to_oracle_bind_sql,
+            read_sql as snowflake_read_sql,
+            remap_oracle_to_snowflake,
+            snf_tr,
+            snowflakedb as SnowflakeDbDriver,
+        )
+
+try:
+    from updater_config import REMOTE_VERSION_DIR
+except Exception:
+    REMOTE_VERSION_DIR = r'\\server\share\snfmigration'
+
+APP_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = APP_DIR / "connections.json"
+ORACLE_REF_REGEX = re.compile(
+    r"\b[A-Z]{2,6}[A-Z0-9_]*_DVA_[A-Z0-9_]+\.(?:V_[A-Z0-9_]+|[A-Z0-9_]+)(?:@[A-Z0-9_]+)?\b",
+    re.IGNORECASE,
+)
+
+RE_ORACLE_AMP = re.compile(r"(?<!&) &([A-Za-z_][A-Za-z0-9_]*)", re.VERBOSE)
+RE_ORACLE_COLON = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
+RE_ORACLE_AMP_FALLBACK = re.compile(r"(?<!&)&([A-Za-z_][A-Za-z0-9_]*)")
+
+REMOTE_ROOT = Path(REMOTE_VERSION_DIR)
+REMOTE_VERSION_PATH = REMOTE_ROOT / "version.json"
+LOCAL_VERSION_PATH = APP_DIR / "version.json"
+LOCAL_UPDATE_EXE = APP_DIR / "update.exe"
+
+
+def load_json_safe(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return default.copy()
+
+
+def version_tuple(version: str) -> tuple[int, ...]:
+    parts = re.findall(r"\d+", str(version or "0"))
+    return tuple(int(p) for p in parts) if parts else (0,)
+
+
+def is_remote_update_available() -> tuple[bool, Dict[str, Any], Dict[str, Any]]:
+    local_meta = load_json_safe(LOCAL_VERSION_PATH, {"version": "0.0.0"})
+    if not REMOTE_ROOT.exists() or not REMOTE_VERSION_PATH.exists():
+        return False, {}, local_meta
+
+    remote_meta = load_json_safe(REMOTE_VERSION_PATH, {"version": "0.0.0"})
+    local_version = str(local_meta.get("version", "0.0.0"))
+    remote_version = str(remote_meta.get("version", "0.0.0"))
+    available = version_tuple(remote_version) > version_tuple(local_version)
+    return available, remote_meta, local_meta
+
+
+def load_config() -> Dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {
+            "oracle_connections": [
+                {"name": "DEV", "host": "", "port": 1521, "service_name": "", "dsn": ""}
+            ],
+            "snowflake_connections": [
+                {"name": "DEV", "account": "", "warehouse": "", "database": "", "schema": "", "role": ""},
+                {"name": "PROD", "account": "", "warehouse": "", "database": "", "schema": "", "role": ""},
+            ],
+        }
+    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+@dataclass
+class OracleSession:
+    connection_name: str
+    username: str
+    conn: Any
+    connect_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SnowflakeSession:
+    connection_name: str
+    username: str
+    conn: Any
+    context: Dict[str, Any]
+    connect_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+
+class DataFrameModel(QAbstractTableModel):
+    def __init__(self, df: Optional[pd.DataFrame] = None):
+        super().__init__()
+        self._df = df if df is not None else pd.DataFrame()
+
+    def set_dataframe(self, df: Optional[pd.DataFrame]):
+        self.beginResetModel()
+        self._df = df if df is not None else pd.DataFrame()
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._df.index)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._df.columns)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid() or role not in (Qt.DisplayRole, Qt.EditRole):
+            return None
+        val = self._df.iat[index.row(), index.column()]
+        return "" if pd.isna(val) else str(val)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            return str(self._df.columns[section]) if section < len(self._df.columns) else ""
+        return str(self._df.index[section])
+
+
+class WorkerSignals(QObject):
+    finished = Signal(object)
+    error = Signal(str)
+
+
+class Worker(QRunnable):
+    def __init__(self, fn: Callable, *args, **kwargs):
+        super().__init__()
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            result = self.fn(*self.args, **self.kwargs)
+            self.signals.finished.emit(result)
+        except Exception:
+            self.signals.error.emit(traceback.format_exc())
+
+
+class LoginDialog(QDialog):
+    def __init__(self, title: str, fields: List[tuple[str, QWidget]], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        for label, widget in fields:
+            form.addRow(label, widget)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(420, 180)
+
+
+class ParamsDialog(QDialog):
+    def __init__(self, param_names: List[str], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Parametry zapytania")
+        self.setModal(True)
+        self._inputs: Dict[str, QLineEdit] = {}
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        for name in param_names:
+            line = QLineEdit(self)
+            line.setPlaceholderText("Wartość lub puste = NULL")
+            self._inputs[name] = line
+            form.addRow(name, line)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(420, max(180, min(700, 80 + 36 * len(param_names))))
+
+    def values(self) -> Dict[str, str]:
+        return {k: v.text() for k, v in self._inputs.items()}
+
+
+class UpdateDialog(QDialog):
+    def __init__(self, current_version: str, new_version: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Dostępna aktualizacja")
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Aktualna wersja: {current_version}"))
+        layout.addWidget(QLabel(f"Nowa wersja: {new_version}"))
+        layout.addWidget(QLabel("Zaktualizować aplikację teraz?"))
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+        self.status = QLabel("")
+        self.status.setVisible(False)
+        layout.addWidget(self.status)
+        buttons = QDialogButtonBox()
+        self.update_btn = buttons.addButton("Aktualizuj", QDialogButtonBox.AcceptRole)
+        self.later_btn = buttons.addButton("Cancel", QDialogButtonBox.RejectRole)
+        self.update_btn.clicked.connect(self.accept)
+        self.later_btn.clicked.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(420, 180)
+
+    def set_progress(self, current: int, total: int, name: str):
+        self.progress.setVisible(True)
+        self.status.setVisible(True)
+        pct = int((current / max(total, 1)) * 100)
+        self.progress.setValue(pct)
+        self.status.setText(f"Kopiowanie: {name}")
+        QApplication.processEvents()
+
+
+class ConnectionBar(QGroupBox):
+    connect_requested = Signal()
+    disconnect_requested = Signal()
+
+    def __init__(self, title: str):
+        super().__init__(title)
+        layout = QHBoxLayout(self)
+        self.status_label = QLabel("Niepołączono")
+        self.status_label.setObjectName("statusLabel")
+        self.connect_btn = QPushButton("Połącz")
+        self.disconnect_btn = QPushButton("Rozłącz")
+        self.disconnect_btn.setEnabled(False)
+        self.connect_btn.clicked.connect(self.connect_requested)
+        self.disconnect_btn.clicked.connect(self.disconnect_requested)
+        layout.addWidget(self.status_label, 1)
+        layout.addWidget(self.connect_btn)
+        layout.addWidget(self.disconnect_btn)
+
+    def set_connected(self, text: str):
+        self.status_label.setText(text)
+        self.connect_btn.setEnabled(False)
+        self.disconnect_btn.setEnabled(True)
+
+    def set_connecting(self, text: str = "Łączenie..."):
+        self.status_label.setText(text)
+        self.connect_btn.setEnabled(False)
+        self.disconnect_btn.setEnabled(False)
+
+    def set_disconnected(self, text: str = "Niepołączono"):
+        self.status_label.setText(text)
+        self.connect_btn.setEnabled(True)
+        self.disconnect_btn.setEnabled(False)
+
+
+class LargeEditorDialog(QDialog):
+    def __init__(self, title: str, text: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(1500, 900)
+        layout = QVBoxLayout(self)
+        self.editor = QPlainTextEdit(self)
+        self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        font = QFont("Consolas")
+        font.setStyleHint(QFont.Monospace)
+        font.setPointSize(11)
+        self.editor.setFont(font)
+        self.editor.setPlainText(text)
+        self.highlighter = SqlSyntaxHighlighter(self.editor.document())
+        layout.addWidget(self.editor, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def text(self) -> str:
+        return self.editor.toPlainText()
+
+
+class EditorPane(QWidget):
+    def __init__(self, title: str):
+        super().__init__()
+        self.title = title
+        layout = QVBoxLayout(self)
+        header = QHBoxLayout()
+        label = QLabel(title)
+        label.setStyleSheet("font-weight: 600;")
+        self.expand_btn = QToolButton()
+        self.expand_btn.setText("⤢")
+        self.expand_btn.setToolTip("Otwórz większe okno edycji")
+        self.expand_btn.clicked.connect(self.open_large_editor)
+        header.addWidget(label)
+        header.addStretch(1)
+        header.addWidget(self.expand_btn)
+        self.editor = QPlainTextEdit()
+        self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        font = QFont("Consolas")
+        font.setStyleHint(QFont.Monospace)
+        font.setPointSize(10)
+        self.editor.setFont(font)
+        self.highlighter = SqlSyntaxHighlighter(self.editor.document())
+        layout.addLayout(header)
+        layout.addWidget(self.editor)
+
+    def open_large_editor(self):
+        dlg = LargeEditorDialog(self.title, self.editor.toPlainText(), self)
+        if dlg.exec() == QDialog.Accepted:
+            self.editor.setPlainText(dlg.text())
+
+
+class SqlSyntaxHighlighter(QSyntaxHighlighter):
+    KEYWORDS = [
+        "SELECT", "FROM", "WHERE", "GROUP", "BY", "ORDER", "HAVING", "JOIN", "LEFT", "RIGHT",
+        "INNER", "OUTER", "FULL", "ON", "WITH", "AS", "CASE", "WHEN", "THEN", "ELSE", "END",
+        "AND", "OR", "NOT", "IN", "EXISTS", "LIKE", "IS", "NULL", "UNION", "ALL", "DISTINCT",
+        "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "REPLACE", "VIEW",
+        "TABLE", "ALTER", "DROP", "MERGE", "USING", "OVER", "PARTITION", "KEEP", "DENSE_RANK",
+        "START", "CONNECT", "PRIOR", "LEVEL", "QUALIFY", "LIMIT", "FETCH", "CURRENT_DATE",
+        "CURRENT_TIMESTAMP", "SYSDATE", "SYSTIMESTAMP", "NVL", "COALESCE", "DECODE", "IFF"
+    ]
+
+    def __init__(self, document):
+        super().__init__(document)
+        self.rules = []
+
+        kw_format = QTextCharFormat()
+        kw_format.setForeground(QColor('#1f4fd6'))
+        kw_format.setFontWeight(QFont.Bold)
+        for kw in self.KEYWORDS:
+            self.rules.append((re.compile(rf'\b{kw}\b', re.IGNORECASE), kw_format))
+
+        fn_format = QTextCharFormat()
+        fn_format.setForeground(QColor('#7a3fb0'))
+        for patt in [
+            re.compile(r'\b[A-Za-z_][A-Za-z0-9_]*\s*(?=\()'),
+        ]:
+            self.rules.append((patt, fn_format))
+
+        bind_format = QTextCharFormat()
+        bind_format.setForeground(QColor('#b54708'))
+        bind_format.setFontWeight(QFont.Bold)
+        for patt in [
+            re.compile(r'(?<!:):[A-Za-z_][A-Za-z0-9_]*'),
+            re.compile(r'(?<!&)\&[A-Za-z_][A-Za-z0-9_]*'),
+            re.compile(r'\$[A-Za-z_][A-Za-z0-9_]*'),
+        ]:
+            self.rules.append((patt, bind_format))
+
+        string_format = QTextCharFormat()
+        string_format.setForeground(QColor('#0a7f3f'))
+        self.rules.append((re.compile(r"'([^']|'')*'"), string_format))
+
+        num_format = QTextCharFormat()
+        num_format.setForeground(QColor('#0f766e'))
+        self.rules.append((re.compile(r'\b\d+(?:\.\d+)?\b'), num_format))
+
+        comment_format = QTextCharFormat()
+        comment_format.setForeground(QColor('#6b7280'))
+        self.rules.append((re.compile(r'--[^\n]*'), comment_format))
+
+    def highlightBlock(self, text):
+        for pattern, fmt in self.rules:
+            for m in pattern.finditer(text):
+                self.setFormat(m.start(), m.end() - m.start(), fmt)
+
+
+class ResultViewerDialog(QDialog):
+    def __init__(self, title: str, df: pd.DataFrame, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.df = df.copy() if df is not None else pd.DataFrame()
+        self.setWindowTitle(title)
+        self.resize(1200, 760)
+        layout = QVBoxLayout(self)
+
+        top = QHBoxLayout()
+        self.meta_label = QLabel()
+        export_btn = QPushButton("Pobierz Excel")
+        export_btn.clicked.connect(self.export_excel)
+        top.addWidget(self.meta_label)
+        top.addStretch(1)
+        top.addWidget(export_btn)
+        layout.addLayout(top)
+
+        self.table = QTableView()
+        self.model = DataFrameModel(self.df)
+        self.table.setModel(self.model)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QTableView.SelectItems)
+        self.table.setSelectionMode(QTableView.ExtendedSelection)
+        layout.addWidget(self.table, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        buttons.button(QDialogButtonBox.Close).clicked.connect(self.close)
+        layout.addWidget(buttons)
+        self._refresh()
+
+    def _refresh(self):
+        rows, cols = self.df.shape if self.df is not None else (0, 0)
+        self.meta_label.setText(f"Wiersze: {rows}    Kolumny: {cols}")
+        self.table.resizeColumnsToContents()
+
+    def export_excel(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Zapisz wynik do Excel", "wynik.xlsx", "Excel (*.xlsx)")
+        if not path:
+            return
+        try:
+            self.df.to_excel(path, index=False)
+            QMessageBox.information(self, "Excel", f"Zapisano plik: {path}")
+        except Exception:
+            QMessageBox.critical(self, "Excel", traceback.format_exc())
+
+
+class ResultsPane(QWidget):
+    def __init__(self, title: str):
+        super().__init__()
+        self._title = title
+        self._current_df = pd.DataFrame()
+        layout = QVBoxLayout(self)
+        header = QHBoxLayout()
+        label = QLabel(title)
+        label.setStyleSheet("font-weight: 600;")
+        self.meta_label = QLabel("Brak danych")
+        self.meta_label.setObjectName("metaLabel")
+        self.view_btn = QToolButton()
+        self.view_btn.setText("Zobacz więcej")
+        self.view_btn.setVisible(False)
+        self.view_btn.clicked.connect(self._open_viewer)
+        header.addWidget(label)
+        header.addStretch(1)
+        header.addWidget(self.meta_label)
+        header.addWidget(self.view_btn)
+        layout.addLayout(header)
+
+        self.table = QTableView()
+        self.table_model = DataFrameModel()
+        self.table.setModel(self.table_model)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionsMovable(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.table.verticalHeader().setVisible(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(False)
+        self.table.setSelectionBehavior(QTableView.SelectItems)
+        self.table.setSelectionMode(QTableView.ExtendedSelection)
+        self.table.setShowGrid(True)
+        self.table.setCornerButtonEnabled(True)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.error_box = QTextEdit()
+        self.error_box.setReadOnly(True)
+        self.error_box.setVisible(False)
+        self.error_box.setMinimumHeight(120)
+        layout.addWidget(self.table, 1)
+        layout.addWidget(self.error_box)
+
+    def _set_meta(self, text: str, show_more: bool = False):
+        self.meta_label.setText(text)
+        self.view_btn.setVisible(show_more)
+
+    def show_dataframe(self, df: pd.DataFrame):
+        self._current_df = df.copy() if df is not None else pd.DataFrame()
+        self.table_model.set_dataframe(self._current_df)
+        self.table.resizeColumnsToContents()
+        self.table.resizeRowsToContents()
+        self.error_box.clear()
+        self.error_box.setVisible(False)
+        rows, cols = self._current_df.shape
+        self._set_meta(f"Wiersze: {rows} | Kolumny: {cols}", show_more=(rows > 0 or cols > 0))
+
+    def show_error(self, error_text: str):
+        self._current_df = pd.DataFrame()
+        self.table_model.set_dataframe(pd.DataFrame())
+        self.error_box.setVisible(True)
+        self.error_box.setPlainText(error_text)
+        self._set_meta("Błąd zapytania", show_more=False)
+
+    def clear(self):
+        self._current_df = pd.DataFrame()
+        self.table_model.set_dataframe(pd.DataFrame())
+        self.error_box.clear()
+        self.error_box.setVisible(False)
+        self._set_meta("Brak danych", show_more=False)
+
+    def _open_viewer(self):
+        if self._current_df is None or self._current_df.empty and len(self._current_df.columns) == 0:
+            return
+        dlg = ResultViewerDialog(self._title, self._current_df, self)
+        dlg.exec()
+
+
+class SqlMigrationWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Oracle ↔ Snowflake SQL Migration Tool")
+        self.resize(1600, 980)
+        self.thread_pool = QThreadPool.globalInstance()
+        self.config = load_config()
+        self.oracle_session: Optional[OracleSession] = None
+        self.snowflake_session: Optional[SnowflakeSession] = None
+        self.current_version = str(load_json_safe(LOCAL_VERSION_PATH, {"version": "0.0.0"}).get("version", "0.0.0"))
+        self._active_worker = None
+        self._active_job_kind: Optional[str] = None
+        self._active_job_scope: Optional[str] = None
+        self._active_oracle_exec_conn = None
+        self._active_oracle_exec_cursor = None
+        self._active_snowflake_exec_conn = None
+        self._active_snowflake_exec_cursor = None
+        self._active_snowflake_query_id: Optional[str] = None
+        self._oracle_cancel_requested = False
+        self._snowflake_cancel_requested = False
+        self._snowflake_connect_worker = None
+        self._build_ui()
+        self._apply_styles()
+        self._seed_defaults()
+        QTimer.singleShot(600, self.check_for_updates_on_startup)
+
+    def _build_ui(self):
+        central = QWidget()
+        main_layout = QVBoxLayout(central)
+        self.setCentralWidget(central)
+
+        conn_layout = QHBoxLayout()
+        self.oracle_bar = ConnectionBar("Oracle")
+        self.snowflake_bar = ConnectionBar("Snowflake")
+        self.oracle_bar.connect_requested.connect(self.connect_oracle)
+        self.oracle_bar.disconnect_requested.connect(self.disconnect_oracle)
+        self.snowflake_bar.connect_requested.connect(self.connect_snowflake)
+        self.snowflake_bar.disconnect_requested.connect(self.disconnect_snowflake)
+        conn_layout.addWidget(self.oracle_bar)
+        conn_layout.addWidget(self.snowflake_bar)
+        main_layout.addLayout(conn_layout)
+
+        self.tabs = QTabWidget()
+        main_layout.addWidget(self.tabs, 1)
+
+        self.editor_tab = self._build_editor_tab()
+        self.folder_tab = self._build_folder_tab()
+        self.tabs.addTab(self.editor_tab, "Edytor")
+        self.tabs.addTab(self.folder_tab, "Folder .sql")
+
+        self.setStatusBar(QStatusBar())
+        self.statusBar().showMessage("Gotowe")
+
+        exit_action = QAction("Zamknij", self)
+        exit_action.triggered.connect(self.close)
+        self.menuBar().addAction(exit_action)
+
+    def _build_editor_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        options_box = QGroupBox("Opcje tłumaczenia")
+        opt_layout = QHBoxLayout(options_box)
+        self.chk_use_set = QCheckBox("Oracle bindy -> Snowflake SET / $VAR")
+        self.chk_comment_set = QCheckBox("Komentuj SET")
+        self.sf_target_db = QLineEdit()
+        self.sf_target_db.setPlaceholderText("DB context, np. D01_DVA")
+        self.sf_target_schema = QLineEdit()
+        self.sf_target_schema.setPlaceholderText("Schema context, np. ABC lub D01_DVA.ABC")
+        opt_layout.addWidget(self.chk_use_set)
+        opt_layout.addWidget(self.chk_comment_set)
+        opt_layout.addSpacing(12)
+        opt_layout.addWidget(QLabel("DB context:"))
+        opt_layout.addWidget(self.sf_target_db)
+        opt_layout.addWidget(QLabel("Schema context:"))
+        opt_layout.addWidget(self.sf_target_schema)
+        layout.addWidget(options_box)
+
+        top_buttons = QHBoxLayout()
+        self.btn_to_sf = QPushButton("Oracle → Snowflake")
+        self.btn_to_oracle = QPushButton("Snowflake → Oracle")
+        self.btn_to_sf.clicked.connect(self.translate_current_to_snowflake)
+        self.btn_to_oracle.clicked.connect(self.translate_current_to_oracle)
+        top_buttons.addStretch(1)
+        top_buttons.addWidget(self.btn_to_sf)
+        top_buttons.addWidget(self.btn_to_oracle)
+        layout.addLayout(top_buttons)
+
+        self.editor_results_splitter = QSplitter(Qt.Horizontal)
+        self.editor_results_splitter.setChildrenCollapsible(False)
+        self.editor_results_splitter.setHandleWidth(12)
+
+        self.oracle_panel_splitter = QSplitter(Qt.Vertical)
+        self.oracle_panel_splitter.setChildrenCollapsible(False)
+        self.oracle_panel_splitter.setHandleWidth(10)
+        self.oracle_editor = EditorPane("Oracle SQL")
+        self.oracle_results = ResultsPane("Oracle result")
+        self.oracle_panel_splitter.addWidget(self.oracle_editor)
+        self.oracle_panel_splitter.addWidget(self.oracle_results)
+        self.oracle_panel_splitter.setSizes([520, 320])
+
+        self.snowflake_panel_splitter = QSplitter(Qt.Vertical)
+        self.snowflake_panel_splitter.setChildrenCollapsible(False)
+        self.snowflake_panel_splitter.setHandleWidth(10)
+        self.snowflake_editor = EditorPane("Snowflake SQL")
+        self.snowflake_results = ResultsPane("Snowflake result")
+        self.snowflake_panel_splitter.addWidget(self.snowflake_editor)
+        self.snowflake_panel_splitter.addWidget(self.snowflake_results)
+        self.snowflake_panel_splitter.setSizes([520, 320])
+
+        self.editor_results_splitter.addWidget(self.oracle_panel_splitter)
+        self.editor_results_splitter.addWidget(self.snowflake_panel_splitter)
+        self.editor_results_splitter.setSizes([800, 800])
+        layout.addWidget(self.editor_results_splitter, 1)
+
+        self.editor_progress_label = QLabel("")
+        self.editor_progress_label.setVisible(False)
+        self.editor_progress = QProgressBar()
+        self.editor_progress.setRange(0, 0)
+        self.editor_progress.setVisible(False)
+        layout.addWidget(self.editor_progress_label)
+        layout.addWidget(self.editor_progress)
+
+        run_layout = QHBoxLayout()
+        self.run_oracle_btn = QPushButton("Run Oracle")
+        self.cancel_oracle_btn = QPushButton("Stop Oracle")
+        self.cancel_oracle_btn.setEnabled(False)
+        self.run_snowflake_btn = QPushButton("Run Snowflake")
+        self.cancel_snowflake_btn = QPushButton("Stop Snowflake")
+        self.cancel_snowflake_btn.setEnabled(False)
+        self.run_oracle_btn.clicked.connect(self.run_oracle_current)
+        self.cancel_oracle_btn.clicked.connect(self.cancel_oracle_query)
+        self.run_snowflake_btn.clicked.connect(self.run_snowflake_current)
+        self.cancel_snowflake_btn.clicked.connect(self.cancel_snowflake_query)
+        run_layout.addWidget(self.run_oracle_btn)
+        run_layout.addWidget(self.cancel_oracle_btn)
+        run_layout.addStretch(1)
+        run_layout.addWidget(self.run_snowflake_btn)
+        run_layout.addWidget(self.cancel_snowflake_btn)
+        layout.addLayout(run_layout)
+        return tab
+
+    def _build_folder_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        top = QHBoxLayout()
+        self.folder_path = QLineEdit(str(Path.cwd()))
+        self.folder_recursive = QCheckBox("Rekurencyjnie")
+        self.folder_recursive.setChecked(True)
+        btn_browse = QPushButton("Wybierz folder")
+        btn_scan = QPushButton("Skanuj")
+        btn_browse.clicked.connect(self.pick_folder)
+        btn_scan.clicked.connect(self.scan_folder)
+        top.addWidget(QLabel("Folder"))
+        top.addWidget(self.folder_path, 1)
+        top.addWidget(self.folder_recursive)
+        top.addWidget(btn_browse)
+        top.addWidget(btn_scan)
+        layout.addLayout(top)
+
+        self.folder_main_splitter = QSplitter(Qt.Horizontal)
+        self.folder_main_splitter.setChildrenCollapsible(False)
+        self.folder_main_splitter.setHandleWidth(12)
+
+        self.file_list = QListWidget()
+        self.file_list.currentItemChanged.connect(self.load_selected_file)
+        self.folder_main_splitter.addWidget(self.file_list)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        btn_row = QHBoxLayout()
+        self.folder_to_sf_btn = QPushButton("Przetłumacz → Snowflake")
+        self.folder_overwrite_btn = QPushButton("Nadpisz plik (Snowflake)")
+        self.folder_run_oracle_btn = QPushButton("Run Oracle")
+        self.folder_cancel_oracle_btn = QPushButton("Stop Oracle")
+        self.folder_cancel_oracle_btn.setEnabled(False)
+        self.folder_run_snowflake_btn = QPushButton("Run Snowflake")
+        self.folder_cancel_snowflake_btn = QPushButton("Stop Snowflake")
+        self.folder_cancel_snowflake_btn.setEnabled(False)
+        self.folder_to_sf_btn.clicked.connect(self.translate_folder_to_snowflake)
+        self.folder_overwrite_btn.clicked.connect(self.overwrite_selected_file)
+        self.folder_run_oracle_btn.clicked.connect(self.run_oracle_folder)
+        self.folder_cancel_oracle_btn.clicked.connect(self.cancel_oracle_query)
+        self.folder_run_snowflake_btn.clicked.connect(self.run_snowflake_folder)
+        self.folder_cancel_snowflake_btn.clicked.connect(self.cancel_snowflake_query)
+        for b in [
+            self.folder_to_sf_btn,
+            self.folder_overwrite_btn,
+            self.folder_run_oracle_btn,
+            self.folder_cancel_oracle_btn,
+            self.folder_run_snowflake_btn,
+            self.folder_cancel_snowflake_btn,
+        ]:
+            btn_row.addWidget(b)
+        self.folder_progress_label = QLabel("")
+        self.folder_progress_label.setVisible(False)
+        self.folder_progress = QProgressBar()
+        self.folder_progress.setRange(0, 0)
+        self.folder_progress.setVisible(False)
+        right_layout.addLayout(btn_row)
+        right_layout.addWidget(self.folder_progress_label)
+        right_layout.addWidget(self.folder_progress)
+
+        self.file_refs = QTextEdit()
+        self.file_refs.setReadOnly(True)
+        self.file_refs.setPlaceholderText("Znalezione referencje z pliku")
+        right_layout.addWidget(self.file_refs)
+
+        self.folder_dual_splitter = QSplitter(Qt.Horizontal)
+        self.folder_dual_splitter.setChildrenCollapsible(False)
+        self.folder_dual_splitter.setHandleWidth(12)
+
+        self.oracle_panel_splitter_2 = QSplitter(Qt.Vertical)
+        self.oracle_panel_splitter_2.setChildrenCollapsible(False)
+        self.oracle_panel_splitter_2.setHandleWidth(10)
+        self.oracle_editor_2 = EditorPane("Oracle SQL (edytowalne)")
+        self.oracle_results_2 = ResultsPane("Oracle result")
+        self.oracle_panel_splitter_2.addWidget(self.oracle_editor_2)
+        self.oracle_panel_splitter_2.addWidget(self.oracle_results_2)
+        self.oracle_panel_splitter_2.setSizes([420, 260])
+
+        self.snowflake_panel_splitter_2 = QSplitter(Qt.Vertical)
+        self.snowflake_panel_splitter_2.setChildrenCollapsible(False)
+        self.snowflake_panel_splitter_2.setHandleWidth(10)
+        self.snowflake_editor_2 = EditorPane("Snowflake SQL (edytowalne)")
+        self.snowflake_results_2 = ResultsPane("Snowflake result")
+        self.snowflake_panel_splitter_2.addWidget(self.snowflake_editor_2)
+        self.snowflake_panel_splitter_2.addWidget(self.snowflake_results_2)
+        self.snowflake_panel_splitter_2.setSizes([420, 260])
+
+        self.folder_dual_splitter.addWidget(self.oracle_panel_splitter_2)
+        self.folder_dual_splitter.addWidget(self.snowflake_panel_splitter_2)
+        self.folder_dual_splitter.setSizes([700, 700])
+        right_layout.addWidget(self.folder_dual_splitter, 1)
+
+        self.folder_main_splitter.addWidget(right)
+        self.folder_main_splitter.setSizes([300, 1200])
+        layout.addWidget(self.folder_main_splitter, 1)
+        return tab
+
+    def _set_splitter_ratio(self, splitter: QSplitter, ratio: List[int]):
+        total = max(200, splitter.size().width() or 1200)
+        values = [max(50, int(total * r / sum(ratio))) for r in ratio]
+        splitter.setSizes(values)
+
+    def _seed_defaults(self):
+        self.oracle_editor.editor.setPlainText(
+            "SELECT *\nFROM HRT99_DVA_ABC.ORDERS@HRT_DTB\nWHERE ORDERDATE >= :p_date\n  AND USER_ID = &user_id"
+        )
+        self.snowflake_editor.editor.setPlainText("SELECT *\nFROM D01_DVA.ABC.ORDERS\nLIMIT 5")
+
+    def _apply_styles(self):
+        self.setStyleSheet(
+            """
+            * {
+                color: #d4d4d4;
+                font-size: 12px;
+            }
+            QMainWindow, QWidget {
+                background: #1e1e1e;
+            }
+            QTabWidget::pane {
+                border: 1px solid #2d2d30;
+                background: #1e1e1e;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #252526;
+                color: #c8c8c8;
+                border: 1px solid #2d2d30;
+                padding: 8px 14px;
+                margin-right: 2px;
+                min-width: 130px;
+            }
+            QTabBar::tab:selected {
+                background: #1f1f1f;
+                border-bottom: 2px solid #0e639c;
+                color: #ffffff;
+            }
+            QGroupBox {
+                font-weight: 600;
+                border: 1px solid #33363f;
+                border-radius: 10px;
+                margin-top: 12px;
+                padding-top: 14px;
+                background: #252526;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #9cdcfe;
+            }
+            QLabel {
+                background: transparent;
+            }
+            QPlainTextEdit, QTextEdit, QListWidget, QTableView, QLineEdit, QComboBox {
+                background: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #3c3c3c;
+                border-radius: 8px;
+                padding: 6px;
+                selection-background-color: #264f78;
+                selection-color: #ffffff;
+            }
+            QPlainTextEdit, QTextEdit {
+                background: #1e1e1e;
+                border: 1px solid #2d2d30;
+                padding: 10px;
+            }
+            QPlainTextEdit:focus, QTextEdit:focus, QLineEdit:focus, QComboBox:focus, QListWidget:focus, QTableView:focus {
+                border: 1px solid #0e639c;
+            }
+            QLineEdit, QComboBox {
+                background: #252526;
+                min-height: 24px;
+            }
+            QComboBox::drop-down {
+                width: 24px;
+                border: none;
+                background: #2d2d30;
+                border-top-right-radius: 8px;
+                border-bottom-right-radius: 8px;
+            }
+            QListWidget {
+                background: #252526;
+            }
+            QTableView {
+                gridline-color: #2d2d30;
+                background: #1e1e1e;
+                alternate-background-color: #252526;
+            }
+            QHeaderView::section {
+                background: #2d2d30;
+                color: #dcdcdc;
+                border: 1px solid #3c3c3c;
+                padding: 7px;
+                font-weight: 600;
+            }
+            QSplitter::handle {
+                background: #2d2d30;
+                width: 8px;
+                height: 8px;
+            }
+            QSplitter::handle:hover {
+                background: #0e639c;
+            }
+            QPushButton {
+                background: #0e639c;
+                color: white;
+                border: 1px solid #1177bb;
+                border-radius: 8px;
+                padding: 8px 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #1177bb;
+            }
+            QPushButton:pressed {
+                background: #094771;
+            }
+            QPushButton:disabled {
+                background: #3a3d41;
+                color: #7f848e;
+                border: 1px solid #3a3d41;
+            }
+            QCheckBox {
+                padding: 4px;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 3px;
+                border: 1px solid #6b6b6b;
+                background: #252526;
+            }
+            QCheckBox::indicator:checked {
+                background: #0e639c;
+                border: 1px solid #0e639c;
+            }
+            QDialog {
+                background: #252526;
+            }
+            QStatusBar {
+                background: #007acc;
+                color: #ffffff;
+                border-top: 1px solid #1177bb;
+            }
+            QStatusBar::item {
+                border: none;
+            }
+            QLabel#statusLabel {
+                font-weight: 600;
+                color: #4ec9b0;
+                background: #1e1e1e;
+                border: 1px solid #2d2d30;
+                border-radius: 6px;
+                padding: 6px 8px;
+            }
+            """
+        )
+
+    # -------- connection handling --------
+    def connect_oracle(self):
+        options = self.config.get("oracle_connections", [])
+        combo = QComboBox()
+        for item in options:
+            combo.addItem(item["name"], item)
+        user_edit = QLineEdit()
+        pwd_edit = QLineEdit()
+        pwd_edit.setEchoMode(QLineEdit.Password)
+        dlg = LoginDialog("Połącz z Oracle", [("Połączenie", combo), ("User", user_edit), ("Password", pwd_edit)], self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        selected = combo.currentData()
+        username = user_edit.text().strip()
+        password = pwd_edit.text()
+        if not selected or not username:
+            QMessageBox.warning(self, "Oracle", "Wybierz połączenie i wpisz user.")
+            return
+
+        host = selected.get("host", "")
+        port = selected.get("port", 1521)
+        service_name = selected.get("service_name", "")
+        dsn = selected.get("dsn") or oracledb.makedsn(host, int(port), service_name=service_name)
+        connect_kwargs = {"user": username, "password": password, "dsn": dsn}
+        try:
+            conn = oracledb.connect(**connect_kwargs)
+            self.oracle_session = OracleSession(selected["name"], username, conn, connect_kwargs=connect_kwargs)
+            txt = f"Połączono: {selected['name']} / {username}"
+            self.oracle_bar.set_connected(txt)
+            self.statusBar().showMessage(txt, 5000)
+        except Exception:
+            QMessageBox.critical(self, "Oracle", traceback.format_exc())
+
+    def disconnect_oracle(self):
+        if self._active_job_kind == "oracle":
+            self.cancel_oracle_query()
+        if self.oracle_session and self.oracle_session.conn:
+            try:
+                self.oracle_session.conn.close()
+            except Exception:
+                pass
+        self.oracle_session = None
+        self.oracle_bar.set_disconnected()
+        self.statusBar().showMessage("Oracle rozłączony", 5000)
+
+    def connect_snowflake(self):
+        options = self.config.get("snowflake_connections", [])
+        combo = QComboBox()
+        for item in options:
+            combo.addItem(item["name"], item)
+
+        user_edit = QLineEdit()
+        pwd_edit = QLineEdit()
+        pwd_edit.setEchoMode(QLineEdit.Password)
+        pwd_edit.setPlaceholderText("Hasło lub puste dla externalbrowser")
+        auth_combo = QComboBox()
+        auth_combo.addItem("Hasło", "password")
+        auth_combo.addItem("externalbrowser", "externalbrowser")
+
+        def _sync_auth_widgets():
+            use_password = auth_combo.currentData() == "password"
+            pwd_edit.setEnabled(use_password)
+            if not use_password:
+                pwd_edit.clear()
+
+        auth_combo.currentIndexChanged.connect(_sync_auth_widgets)
+
+        dlg = LoginDialog(
+            "Połącz ze Snowflake",
+            [("Połączenie", combo), ("Login", user_edit), ("Metoda", auth_combo), ("Password", pwd_edit)],
+            self,
+        )
+        selected = combo.currentData()
+        if isinstance(selected, dict) and str(selected.get("authenticator") or "").lower() == "externalbrowser":
+            auth_combo.setCurrentIndex(1)
+            _sync_auth_widgets()
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        selected = combo.currentData()
+        username = user_edit.text().strip()
+        password = pwd_edit.text()
+        auth_mode = auth_combo.currentData()
+        if not selected or not username:
+            QMessageBox.warning(self, "Snowflake", "Wybierz połączenie i wpisz login.")
+            return
+        if auth_mode == "password" and not password:
+            QMessageBox.warning(self, "Snowflake", "Dla logowania hasłem wpisz password albo wybierz externalbrowser.")
+            return
+
+        kwargs = {
+            "user": username,
+            "account": selected.get("account", ""),
+            "warehouse": selected.get("warehouse", ""),
+            "database": selected.get("database", ""),
+            "schema": selected.get("schema", ""),
+            "role": selected.get("role") or None,
+        }
+        if auth_mode == "externalbrowser":
+            kwargs["authenticator"] = "externalbrowser"
+        else:
+            kwargs["password"] = password
+
+        self.snowflake_bar.set_connecting("Łączenie / autoryzacja...")
+        self.statusBar().showMessage("Snowflake: otwieram połączenie...", 5000)
+        worker = Worker(self._connect_snowflake_worker, selected["name"], username, dict(selected), kwargs)
+        self._snowflake_connect_worker = worker
+        worker.signals.finished.connect(self._connect_snowflake_success)
+        worker.signals.error.connect(self._connect_snowflake_error)
+        self.thread_pool.start(worker)
+
+    def _connect_snowflake_worker(self, connection_name: str, username: str, selected: Dict[str, Any], kwargs: Dict[str, Any]):
+        conn = SnowflakeDbDriver.connect(**kwargs)
+        return {
+            "connection_name": connection_name,
+            "username": username,
+            "selected": selected,
+            "kwargs": kwargs,
+            "conn": conn,
+        }
+
+    def _connect_snowflake_success(self, payload: Dict[str, Any]):
+        self._snowflake_connect_worker = None
+        if self.snowflake_session and self.snowflake_session.conn:
+            try:
+                self.snowflake_session.conn.close()
+            except Exception:
+                pass
+        self.snowflake_session = SnowflakeSession(
+            payload["connection_name"],
+            payload["username"],
+            payload["conn"],
+            dict(payload["selected"]),
+            connect_kwargs=dict(payload["kwargs"]),
+        )
+        txt = f"Połączono: {payload['connection_name']} / {payload['username']}"
+        self.snowflake_bar.set_connected(txt)
+        self.statusBar().showMessage(txt, 5000)
+
+    def _connect_snowflake_error(self, err: str):
+        self._snowflake_connect_worker = None
+        self.snowflake_bar.set_disconnected()
+        QMessageBox.critical(self, "Snowflake", err)
+
+    def disconnect_snowflake(self):
+        if self._active_job_kind == "snowflake":
+            self.cancel_snowflake_query()
+        if self.snowflake_session and self.snowflake_session.conn:
+            try:
+                self.snowflake_session.conn.close()
+            except Exception:
+                pass
+        self.snowflake_session = None
+        self.snowflake_bar.set_disconnected()
+        self.statusBar().showMessage("Snowflake rozłączony", 5000)
+
+    # -------- translation --------
+    def translate_current_to_snowflake(self):
+        try:
+            sql = self.oracle_editor.editor.toPlainText()
+            translated = snf_tr(
+                sql,
+                use_snowflake_vars=self.chk_use_set.isChecked(),
+                comment_set=self.chk_comment_set.isChecked(),
+                target_database=self._current_sf_database(),
+                target_schema=self._current_sf_schema_qualified(),
+            )
+            self.snowflake_editor.editor.setPlainText(translated)
+        except Exception:
+            QMessageBox.critical(self, "Tłumaczenie", traceback.format_exc())
+
+    def translate_current_to_oracle(self):
+        sql = self.snowflake_editor.editor.toPlainText()
+        sql = re.sub(r"\$([A-Za-z_][A-Za-z0-9_]*)", lambda m: f":{m.group(1).lower()}", sql)
+        self.oracle_editor.editor.setPlainText(sql)
+
+    def translate_folder_to_snowflake(self):
+        try:
+            sql = self.oracle_editor_2.editor.toPlainText()
+            translated = snf_tr(
+                sql,
+                use_snowflake_vars=self.chk_use_set.isChecked(),
+                comment_set=self.chk_comment_set.isChecked(),
+                target_database=self._current_sf_database(),
+                target_schema=self._current_sf_schema_qualified(),
+            )
+            self.snowflake_editor_2.editor.setPlainText(translated)
+        except Exception:
+            QMessageBox.critical(self, "Tłumaczenie", traceback.format_exc())
+
+    # -------- parameter helpers --------
+    def _extract_live_params(self, sql: str) -> List[str]:
+        seen = []
+        for name in extract_oracle_params(sql) or []:
+            upper = str(name).upper()
+            if upper not in seen:
+                seen.append(upper)
+        for name in extract_snowflake_variable_names(sql) or []:
+            upper = str(name).upper()
+            if upper not in seen:
+                seen.append(upper)
+        for rx in (RE_ORACLE_AMP_FALLBACK, RE_ORACLE_COLON):
+            for m in rx.finditer(sql or ""):
+                upper = m.group(1).upper()
+                if upper not in seen:
+                    seen.append(upper)
+        return seen
+
+    def _prompt_for_params(self, sql: str) -> Optional[Dict[str, str]]:
+        names = self._extract_live_params(sql)
+        if not names:
+            return {}
+        dlg = ParamsDialog(names, self)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return dlg.values()
+
+    def _current_sf_database(self) -> Optional[str]:
+        if self.snowflake_session:
+            return (self.snowflake_session.context.get("database") or "").strip() or None
+        txt = self.sf_target_db.text().strip()
+        return txt or None
+
+    def _current_sf_schema_qualified(self) -> Optional[str]:
+        if self.snowflake_session:
+            db = (self.snowflake_session.context.get("database") or "").strip()
+            schema = (self.snowflake_session.context.get("schema") or "").strip()
+            if db and schema:
+                return f"{db}.{schema}"
+            if schema:
+                return schema
+
+        db = (self.sf_target_db.text() or "").strip()
+        schema = (self.sf_target_schema.text() or "").strip()
+        if not schema:
+            return None
+        if "." in schema:
+            return schema
+        if db:
+            return f"{db}.{schema}"
+        return schema
+
+    def _conn_sf_database(self, conn) -> Optional[str]:
+        value = getattr(conn, "database", None) or getattr(conn, "database_name", None)
+        if value:
+            return str(value).strip() or None
+        return self._current_sf_database()
+
+    def _conn_sf_schema_qualified(self, conn) -> Optional[str]:
+        db = self._conn_sf_database(conn)
+        schema = getattr(conn, "schema", None) or getattr(conn, "schema_name", None)
+        schema = (str(schema).strip() if schema else "")
+        if db and schema:
+            return f"{db}.{schema}"
+        if schema:
+            return schema
+        return self._current_sf_schema_qualified()
+
+    def _normalize_param_values(self, params: Dict[str, str]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for k, v in (params or {}).items():
+            out[k] = None if v == "" else v
+            out[k.lower()] = None if v == "" else v
+            out[k.upper()] = None if v == "" else v
+        return out
+
+    def _clean_sql_for_execution(self, sql: str) -> str:
+        cleaned = (sql or "").strip()
+        cleaned = re.sub(r";\s*$", "", cleaned)
+        return cleaned
+
+    def _strip_set_statements(self, sql: str) -> str:
+        lines = []
+        for line in (sql or "").splitlines():
+            if line.strip().upper().startswith("SET "):
+                continue
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _snowflake_literal(self, value: Any) -> str:
+        if value is None or value == "":
+            return "NULL"
+        if isinstance(value, str):
+            return "'" + value.replace("'", "''") + "'"
+        return str(value)
+
+    def _build_snowflake_replacements(self, params: Dict[str, str]) -> Dict[str, str]:
+        replacements: Dict[str, str] = {}
+        for name, value in (params or {}).items():
+            upper = str(name).upper()
+            lower = str(name).lower()
+            literal = self._snowflake_literal(None if value == "" else value)
+            for token in {
+                f"${upper}", f"${lower}", f"${name}",
+                f":{upper}", f":{lower}", f":{name}",
+                f"&{upper}", f"&{lower}", f"&{name}",
+            }:
+                replacements[token] = literal
+        return dict(sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True))
+
+    def _prepare_snowflake_sql_for_execution(self, conn, sql: str, params: Dict[str, str]) -> str:
+        out = sql or ""
+        has_oracle_binds = bool(extract_oracle_params(out))
+        has_oracle_object_names = bool(ORACLE_REF_REGEX.search(out or ""))
+        if has_oracle_binds or has_oracle_object_names:
+            out = snf_tr(
+                out,
+                use_snowflake_vars=False,
+                comment_set=False,
+                target_database=self._conn_sf_database(conn),
+                target_schema=self._conn_sf_schema_qualified(conn),
+            )
+        out = self._strip_set_statements(out)
+        out = oracle_params_to_snowflake_vars(out)
+        replacements = self._build_snowflake_replacements(params)
+        for token, value in replacements.items():
+            out = out.replace(token, value)
+        return self._clean_sql_for_execution(out)
+
+    def _fetch_dataframe_from_cursor(self, cur) -> pd.DataFrame:
+        if cur.description:
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+            return pd.DataFrame(rows, columns=cols)
+        return pd.DataFrame([{"STATUS": "OK", "ROWCOUNT": cur.rowcount}])
+
+    def _execute_oracle_sql(self, sql: str, params: Dict[str, str]) -> pd.DataFrame:
+        exec_sql = self._clean_sql_for_execution(oracle_to_oracle_bind_sql(sql))
+        bind_params = self._normalize_param_values(params)
+        conn = oracledb.connect(**self.oracle_session.connect_kwargs)
+        self._active_oracle_exec_conn = conn
+        try:
+            cur = conn.cursor()
+            self._active_oracle_exec_cursor = cur
+            try:
+                cur.execute(exec_sql, bind_params)
+                if cur.description:
+                    cols = [d[0] for d in cur.description]
+                    rows = cur.fetchall()
+                    return pd.DataFrame(rows, columns=cols)
+                conn.commit()
+                return pd.DataFrame([{"STATUS": "OK", "ROWCOUNT": cur.rowcount}])
+            finally:
+                try:
+                    cur.close()
+                finally:
+                    self._active_oracle_exec_cursor = None
+        finally:
+            self._active_oracle_exec_conn = None
+            conn.close()
+
+    def _execute_snowflake_sql(self, sql: str, params: Dict[str, str]) -> pd.DataFrame:
+        conn = SnowflakeDbDriver.connect(**self.snowflake_session.connect_kwargs)
+        self._active_snowflake_exec_conn = conn
+        self._active_snowflake_query_id = None
+        try:
+            exec_sql = self._prepare_snowflake_sql_for_execution(conn, sql, params)
+            cur = conn.cursor()
+            self._active_snowflake_exec_cursor = cur
+            try:
+                cur.execute_async(exec_sql)
+                self._active_snowflake_query_id = getattr(cur, "sfqid", None)
+                if not self._active_snowflake_query_id:
+                    cur.execute(exec_sql)
+                    return self._fetch_dataframe_from_cursor(cur)
+
+                while True:
+                    status = conn.get_query_status_throw_if_error(self._active_snowflake_query_id)
+                    if not conn.is_still_running(status):
+                        break
+                    time.sleep(0.25)
+
+                cur.get_results_from_sfqid(self._active_snowflake_query_id)
+                return self._fetch_dataframe_from_cursor(cur)
+            finally:
+                try:
+                    cur.close()
+                finally:
+                    self._active_snowflake_exec_cursor = None
+                    self._active_snowflake_query_id = None
+        finally:
+            self._active_snowflake_exec_conn = None
+            conn.close()
+
+    def run_oracle_current(self):
+        if not self.oracle_session:
+            QMessageBox.warning(self, "Oracle", "Najpierw połącz z Oracle.")
+            return
+        sql = self.oracle_editor.editor.toPlainText()
+        params = self._prompt_for_params(sql)
+        if params is None:
+            return
+        self._run_db_job(
+            lambda: self._execute_oracle_sql(sql, params),
+            self.oracle_results,
+            "Oracle",
+            kind="oracle",
+            scope="editor",
+        )
+
+    def run_snowflake_current(self):
+        if not self.snowflake_session:
+            QMessageBox.warning(self, "Snowflake", "Najpierw połącz ze Snowflake.")
+            return
+        sql = self.snowflake_editor.editor.toPlainText()
+        params = self._prompt_for_params(sql)
+        if params is None:
+            return
+        self._run_db_job(
+            lambda: self._execute_snowflake_sql(sql, params),
+            self.snowflake_results,
+            "Snowflake",
+            kind="snowflake",
+            scope="editor",
+        )
+
+    def run_oracle_folder(self):
+        if not self.oracle_session:
+            QMessageBox.warning(self, "Oracle", "Najpierw połącz z Oracle.")
+            return
+        sql = self.oracle_editor_2.editor.toPlainText()
+        params = self._prompt_for_params(sql)
+        if params is None:
+            return
+        self._run_db_job(
+            lambda: self._execute_oracle_sql(sql, params),
+            self.oracle_results_2,
+            "Oracle",
+            kind="oracle",
+            scope="folder",
+        )
+
+    def run_snowflake_folder(self):
+        if not self.snowflake_session:
+            QMessageBox.warning(self, "Snowflake", "Najpierw połącz ze Snowflake.")
+            return
+        sql = self.snowflake_editor_2.editor.toPlainText()
+        params = self._prompt_for_params(sql)
+        if params is None:
+            return
+        self._run_db_job(
+            lambda: self._execute_snowflake_sql(sql, params),
+            self.snowflake_results_2,
+            "Snowflake",
+            kind="snowflake",
+            scope="folder",
+        )
+
+    def _set_busy(self, busy: bool, message: str = "", scope: Optional[str] = None, kind: Optional[str] = None):
+        run_buttons = [
+            self.run_oracle_btn, self.run_snowflake_btn, self.folder_run_oracle_btn, self.folder_run_snowflake_btn,
+            self.btn_to_sf, self.btn_to_oracle, self.folder_to_sf_btn, self.folder_overwrite_btn,
+        ]
+        for btn in run_buttons:
+            btn.setEnabled(not busy)
+        self.oracle_bar.connect_btn.setEnabled(not busy and self.oracle_session is None)
+        self.snowflake_bar.connect_btn.setEnabled(not busy and self.snowflake_session is None and self._snowflake_connect_worker is None)
+        self._set_progress_widgets(self.editor_progress_label, self.editor_progress, busy and scope == "editor", message)
+        self._set_progress_widgets(self.folder_progress_label, self.folder_progress, busy and scope == "folder", message)
+        if busy:
+            self._active_job_kind = kind
+            self._active_job_scope = scope
+        else:
+            self._active_job_kind = None
+            self._active_job_scope = None
+        self._refresh_cancel_buttons()
+
+    def _set_progress_widgets(self, label_widget: QLabel, bar_widget: QProgressBar, visible: bool, message: str):
+        label_widget.setVisible(visible)
+        bar_widget.setVisible(visible)
+        if visible:
+            label_widget.setText(message)
+            bar_widget.setRange(0, 0)
+        else:
+            label_widget.clear()
+
+    def _refresh_cancel_buttons(self):
+        oracle_running = self._active_job_kind == "oracle"
+        snowflake_running = self._active_job_kind == "snowflake"
+        for btn in [self.cancel_oracle_btn, self.folder_cancel_oracle_btn]:
+            btn.setEnabled(oracle_running)
+        for btn in [self.cancel_snowflake_btn, self.folder_cancel_snowflake_btn]:
+            btn.setEnabled(snowflake_running)
+
+    def cancel_oracle_query(self):
+        conn = self._active_oracle_exec_conn
+        if conn is None:
+            self.statusBar().showMessage("Oracle: brak aktywnego zapytania", 3000)
+            return
+        self._oracle_cancel_requested = True
+        try:
+            conn.cancel()
+            self.statusBar().showMessage("Oracle: przerwanie zapytania...", 5000)
+        except Exception:
+            try:
+                conn.close()
+                self.statusBar().showMessage("Oracle: zamykam połączenie do przerwania zapytania...", 5000)
+            except Exception:
+                self.statusBar().showMessage("Oracle: nie udało się przerwać zapytania", 5000)
+
+    def cancel_snowflake_query(self):
+        conn = self._active_snowflake_exec_conn
+        query_id = self._active_snowflake_query_id
+        if conn is None:
+            self.statusBar().showMessage("Snowflake: brak aktywnego zapytania", 3000)
+            return
+        self._snowflake_cancel_requested = True
+        cancelled = False
+        if query_id:
+            sql = f"SELECT SYSTEM$CANCEL_QUERY('{query_id}')"
+            try:
+                with conn.cursor() as cancel_cur:
+                    cancel_cur.execute(sql)
+                cancelled = True
+            except Exception:
+                pass
+            if not cancelled:
+                try:
+                    cancel_conn = SnowflakeDbDriver.connect(**self.snowflake_session.connect_kwargs)
+                    try:
+                        with cancel_conn.cursor() as cancel_cur:
+                            cancel_cur.execute(sql)
+                        cancelled = True
+                    finally:
+                        cancel_conn.close()
+                except Exception:
+                    cancelled = False
+        if not cancelled:
+            try:
+                conn.close()
+                cancelled = True
+            except Exception:
+                cancelled = False
+        if cancelled:
+            self.statusBar().showMessage("Snowflake: przerwanie zapytania...", 5000)
+        else:
+            self.statusBar().showMessage("Snowflake: nie udało się przerwać zapytania", 5000)
+
+    def _run_db_job(self, fn: Callable[[], pd.DataFrame], results_pane: ResultsPane, label: str, kind: str, scope: str):
+        self.statusBar().showMessage(f"Uruchamianie: {label}...")
+        results_pane.clear()
+        self._set_busy(True, f"{label}: wykonywanie zapytania...", scope=scope, kind=kind)
+        if kind == "oracle":
+            self._oracle_cancel_requested = False
+        if kind == "snowflake":
+            self._snowflake_cancel_requested = False
+        worker = Worker(fn)
+        self._active_worker = worker
+        worker.signals.finished.connect(lambda df: self._job_success(df, results_pane, label))
+        worker.signals.error.connect(lambda err: self._job_error(err, results_pane, label))
+        self.thread_pool.start(worker)
+
+    def _is_cancelled_job(self, label: str, err: str) -> bool:
+        text = (err or "").upper()
+        if label.lower() == "oracle":
+            return self._oracle_cancel_requested or "ORA-01013" in text or "USER REQUESTED CANCEL" in text
+        return self._snowflake_cancel_requested or "CANCEL" in text or "ERRNO = 604" in text or "QUERY WAS CANCELED" in text
+
+    def _job_success(self, df: pd.DataFrame, results_pane: ResultsPane, label: str):
+        self._set_busy(False)
+        self._active_worker = None
+        self._oracle_cancel_requested = False
+        self._snowflake_cancel_requested = False
+        results_pane.show_dataframe(df)
+        self.statusBar().showMessage(f"{label}: gotowe ({len(df)} wierszy)", 5000)
+
+    def _job_error(self, err: str, results_pane: ResultsPane, label: str):
+        self._set_busy(False)
+        self._active_worker = None
+        cancelled = self._is_cancelled_job(label, err)
+        self._oracle_cancel_requested = False
+        self._snowflake_cancel_requested = False
+        if cancelled:
+            results_pane.show_error("Zapytanie przerwane przez użytkownika.")
+            self.statusBar().showMessage(f"{label}: przerwano", 5000)
+        else:
+            results_pane.show_error(err)
+            self.statusBar().showMessage(f"{label}: błąd", 5000)
+
+    def pick_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "Wybierz folder", self.folder_path.text())
+        if path:
+            self.folder_path.setText(path)
+    
+    def scan_folder(self):
+        base = Path(self.folder_path.text().strip())
+        if not base.exists() or not base.is_dir():
+            QMessageBox.warning(self, "Folder", "To nie jest poprawny katalog.")
+            return
+        self.file_list.clear()
+        pattern = "**/*.sql" if self.folder_recursive.isChecked() else "*.sql"
+        found = 0
+        for p in base.glob(pattern):
+            if not p.is_file():
+                continue
+            txt = p.read_text(encoding="utf-8", errors="ignore")
+            refs = sorted(set(ORACLE_REF_REGEX.findall(txt)))
+            params = self._extract_live_params(txt)
+            if refs:
+                item = QListWidgetItem(f"{p.name} (refs:{len(refs)}) — {p}")
+                item.setData(Qt.UserRole, {"path": str(p), "refs": refs, "params": params})
+                self.file_list.addItem(item)
+                found += 1
+        self.statusBar().showMessage(f"Znalezione pliki: {found}", 5000)
+    
+    def load_selected_file(self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem] = None):
+        if not current:
+            return
+        data = current.data(Qt.UserRole) or {}
+        path = Path(data.get("path", ""))
+        if not path.exists():
+            return
+        txt = path.read_text(encoding="utf-8", errors="ignore")
+        self.oracle_editor_2.editor.setPlainText(txt)
+        self.snowflake_editor_2.editor.clear()
+        refs = data.get("refs", [])
+        params = data.get("params", [])
+        parts = []
+        if refs:
+            parts.append("Refs:\n" + "\n".join(refs[:200]))
+        if params:
+            parts.append("\nParametry:\n" + "\n".join(params))
+        self.file_refs.setPlainText("\n\n".join(parts))
+        self.oracle_results_2.clear()
+        self.snowflake_results_2.clear()
+    
+    def overwrite_selected_file(self):
+        item = self.file_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Plik", "Najpierw wybierz plik.")
+            return
+        data = item.data(Qt.UserRole) or {}
+        path = Path(data.get("path", ""))
+        if not path.exists():
+            QMessageBox.warning(self, "Plik", "Plik nie istnieje.")
+            return
+        content = self.snowflake_editor_2.editor.toPlainText().strip()
+        if not content:
+            self.translate_folder_to_snowflake()
+            content = self.snowflake_editor_2.editor.toPlainText().strip()
+        bak = path.with_suffix(path.suffix + ".bak")
+        if not bak.exists():
+            bak.write_text(path.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
+        path.write_text(content, encoding="utf-8")
+        QMessageBox.information(self, "Plik", f"Nadpisano plik. Backup: {bak.name}")
+
+    def check_for_updates_on_startup(self):
+        try:
+            if not REMOTE_VERSION_PATH.exists():
+                return
+            available, remote_meta, local_meta = is_remote_update_available()
+            if not available:
+                return
+            dlg = UpdateDialog(
+                str(local_meta.get("version", "0.0.0")),
+                str(remote_meta.get("version", "0.0.0")),
+                self,
+            )
+            dlg.later_btn.setText("Cancel")
+            if dlg.exec() != QDialog.Accepted:
+                return
+            self.perform_application_update(remote_meta)
+        except Exception:
+            return
+
+    def perform_application_update(self, remote_meta: Optional[Dict[str, Any]] = None):
+        remote_meta = remote_meta or load_json_safe(REMOTE_VERSION_PATH, {"version": "0.0.0"})
+        try:
+            if not LOCAL_UPDATE_EXE.exists():
+                QMessageBox.warning(
+                    self,
+                    "Aktualizacja",
+                    f"Nie znaleziono pliku update.exe w katalogu aplikacji:\n{LOCAL_UPDATE_EXE}"
+                )
+                return
+
+            version_text = str(remote_meta.get("version", "0.0.0"))
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+            subprocess.Popen([str(LOCAL_UPDATE_EXE)], cwd=str(APP_DIR), creationflags=creationflags)
+            QApplication.instance().quit()
+        except Exception:
+            QMessageBox.critical(self, "Błąd aktualizacji", traceback.format_exc())
+
+
+def main():
+    app = QApplication(sys.argv)
+    window = SqlMigrationWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
