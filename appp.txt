@@ -1398,7 +1398,7 @@ class SqlMigrationWindow(QMainWindow):
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
             return pd.DataFrame(rows, columns=cols)
-        return pd.DataFrame([{"STATUS": "OK", "ROWCOUNT": cur.rowcount}])
+        return pd.DataFrame()
 
     def _execute_oracle_sql(self, sql: str, params: Dict[str, str]) -> pd.DataFrame:
         exec_sql = self._clean_sql_for_execution(oracle_to_oracle_bind_sql(sql))
@@ -1436,29 +1436,16 @@ class SqlMigrationWindow(QMainWindow):
                 return pd.DataFrame()
 
             last_df: Optional[pd.DataFrame] = None
-            last_status_df: Optional[pd.DataFrame] = None
 
             for stmt in statements:
                 cur = conn.cursor()
                 self._active_snowflake_exec_cursor = cur
                 try:
-                    cur.execute_async(stmt)
+                    cur.execute(stmt)
                     self._active_snowflake_query_id = getattr(cur, "sfqid", None)
-                    if self._active_snowflake_query_id:
-                        while True:
-                            status = conn.get_query_status_throw_if_error(self._active_snowflake_query_id)
-                            if not conn.is_still_running(status):
-                                break
-                            time.sleep(0.25)
-                        cur.get_results_from_sfqid(self._active_snowflake_query_id)
-                    else:
-                        cur.execute(stmt)
 
-                    fetched = self._fetch_dataframe_from_cursor(cur)
                     if cur.description:
-                        last_df = fetched
-                    else:
-                        last_status_df = fetched
+                        last_df = self._fetch_dataframe_from_cursor(cur)
                 finally:
                     try:
                         cur.close()
@@ -1466,11 +1453,7 @@ class SqlMigrationWindow(QMainWindow):
                         self._active_snowflake_exec_cursor = None
                         self._active_snowflake_query_id = None
 
-            if last_df is not None:
-                return last_df
-            if last_status_df is not None:
-                return last_status_df
-            return pd.DataFrame()
+            return last_df if last_df is not None else pd.DataFrame()
         finally:
             self._active_snowflake_exec_conn = None
             conn.close()
