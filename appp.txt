@@ -106,6 +106,7 @@ RE_ORACLE_COLON = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
 RE_ORACLE_AMP_FALLBACK = re.compile(r"(?<!&)&([A-Za-z_][A-Za-z0-9_]*)")
 RE_SNOWFLAKE_VAR = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 RE_UNCOMMENTED_SET_LINE = re.compile(r"^\s*SET\s+([A-Za-z_][A-Za-z0-9_]*)\s*=", re.IGNORECASE)
+RE_TEMPLATE_BRACE = re.compile(r"\{[^{}\n]+\}")
 
 REMOTE_ROOT = Path(REMOTE_VERSION_DIR)
 REMOTE_VERSION_PATH = REMOTE_ROOT / "version.json"
@@ -151,6 +152,24 @@ def load_config() -> Dict[str, Any]:
             ],
         }
     return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def _mask_template_braces(sql: str) -> tuple[str, Dict[str, str]]:
+    mapping: Dict[str, str] = {}
+
+    def repl(match: re.Match[str]) -> str:
+        token = f"__KEEPBRACE_{len(mapping)}__"
+        mapping[token] = match.group(0)
+        return token
+
+    return RE_TEMPLATE_BRACE.sub(repl, sql or ""), mapping
+
+
+def _unmask_template_braces(sql: str, mapping: Dict[str, str]) -> str:
+    out = sql or ""
+    for token, original in mapping.items():
+        out = out.replace(token, original)
+    return out
 
 
 @dataclass
@@ -662,12 +681,15 @@ class SqlMigrationWindow(QMainWindow):
         opt_layout = QHBoxLayout(options_box)
         self.chk_use_set = QCheckBox("Oracle bindy -> Snowflake SET / $VAR")
         self.chk_comment_set = QCheckBox("Komentuj SET")
+        self.chk_keep_braces = QCheckBox("Keep {}")
+        self.chk_keep_braces.setToolTip("Zostawia {zmienne} bez zmian podczas tłumaczenia")
         self.sf_target_db = QLineEdit()
         self.sf_target_db.setPlaceholderText("DB context, np. D01_DVA")
         self.sf_target_schema = QLineEdit()
         self.sf_target_schema.setPlaceholderText("Schema context, np. ABC lub D01_DVA.ABC")
         opt_layout.addWidget(self.chk_use_set)
         opt_layout.addWidget(self.chk_comment_set)
+        opt_layout.addWidget(self.chk_keep_braces)
         opt_layout.addSpacing(12)
         opt_layout.addWidget(QLabel("DB context:"))
         opt_layout.addWidget(self.sf_target_db)
@@ -758,6 +780,27 @@ class SqlMigrationWindow(QMainWindow):
         top.addWidget(btn_browse)
         top.addWidget(btn_scan)
         layout.addLayout(top)
+
+        folder_options_box = QGroupBox("Opcje tłumaczenia")
+        folder_opt_layout = QHBoxLayout(folder_options_box)
+        self.folder_chk_use_set = QCheckBox("Oracle bindy -> Snowflake SET / $VAR")
+        self.folder_chk_comment_set = QCheckBox("Komentuj SET")
+        self.folder_chk_keep_braces = QCheckBox("Keep {}")
+        self.folder_chk_keep_braces.setToolTip("Zostawia {zmienne} bez zmian podczas tłumaczenia")
+        self.folder_sf_target_db = QLineEdit()
+        self.folder_sf_target_db.setPlaceholderText("DB context, np. D01_DVA")
+        self.folder_sf_target_schema = QLineEdit()
+        self.folder_sf_target_schema.setPlaceholderText("Schema context, np. ABC lub D01_DVA.ABC")
+        folder_opt_layout.addWidget(self.folder_chk_use_set)
+        folder_opt_layout.addWidget(self.folder_chk_comment_set)
+        folder_opt_layout.addWidget(self.folder_chk_keep_braces)
+        folder_opt_layout.addSpacing(12)
+        folder_opt_layout.addWidget(QLabel("DB context:"))
+        folder_opt_layout.addWidget(self.folder_sf_target_db)
+        folder_opt_layout.addWidget(QLabel("Schema context:"))
+        folder_opt_layout.addWidget(self.folder_sf_target_schema)
+        self.folder_options_section = CollapsibleSection("Opcje tłumaczenia", folder_options_box, expanded=False)
+        layout.addWidget(self.folder_options_section)
 
         self.folder_main_splitter = QSplitter(Qt.Horizontal)
         self.folder_main_splitter.setChildrenCollapsible(False)
@@ -1170,13 +1213,7 @@ class SqlMigrationWindow(QMainWindow):
     def translate_current_to_snowflake(self):
         try:
             sql = self.oracle_editor.editor.toPlainText()
-            translated = snf_tr(
-                sql,
-                use_snowflake_vars=self.chk_use_set.isChecked(),
-                comment_set=self.chk_comment_set.isChecked(),
-                target_database=self._current_sf_database(),
-                target_schema=self._current_sf_schema_qualified(),
-            )
+            translated = self._translate_to_snowflake(sql, scope="editor")
             self.snowflake_editor.editor.setPlainText(translated)
         except Exception:
             QMessageBox.critical(self, "Tłumaczenie", traceback.format_exc())
@@ -1189,13 +1226,7 @@ class SqlMigrationWindow(QMainWindow):
     def translate_folder_to_snowflake(self):
         try:
             sql = self.oracle_editor_2.editor.toPlainText()
-            translated = snf_tr(
-                sql,
-                use_snowflake_vars=self.chk_use_set.isChecked(),
-                comment_set=self.chk_comment_set.isChecked(),
-                target_database=self._current_sf_database(),
-                target_schema=self._current_sf_schema_qualified(),
-            )
+            translated = self._translate_to_snowflake(sql, scope="folder")
             self.snowflake_editor_2.editor.setPlainText(translated)
         except Exception:
             QMessageBox.critical(self, "Tłumaczenie", traceback.format_exc())
@@ -1312,6 +1343,58 @@ class SqlMigrationWindow(QMainWindow):
             return f"{db}.{schema}"
         return schema
 
+    def _translation_widgets(self, scope: str) -> Dict[str, Any]:
+        if scope == "folder":
+            return {
+                "use_set": self.folder_chk_use_set,
+                "comment_set": self.folder_chk_comment_set,
+                "keep_braces": self.folder_chk_keep_braces,
+                "db": self.folder_sf_target_db,
+                "schema": self.folder_sf_target_schema,
+            }
+        return {
+            "use_set": self.chk_use_set,
+            "comment_set": self.chk_comment_set,
+            "keep_braces": self.chk_keep_braces,
+            "db": self.sf_target_db,
+            "schema": self.sf_target_schema,
+        }
+
+    def _translate_to_snowflake(self, sql: str, scope: str = "editor", conn=None) -> str:
+        widgets = self._translation_widgets(scope)
+        keep_braces = widgets["keep_braces"].isChecked()
+        masked_sql = sql or ""
+        brace_mapping: Dict[str, str] = {}
+        if keep_braces:
+            masked_sql, brace_mapping = _mask_template_braces(masked_sql)
+
+        if conn is not None:
+            target_database = self._conn_sf_database(conn)
+            target_schema = self._conn_sf_schema_qualified(conn)
+        else:
+            target_database = (widgets["db"].text() or "").strip() or self._current_sf_database()
+            schema_txt = (widgets["schema"].text() or "").strip()
+            if schema_txt:
+                if "." in schema_txt:
+                    target_schema = schema_txt
+                elif target_database:
+                    target_schema = f"{target_database}.{schema_txt}"
+                else:
+                    target_schema = schema_txt
+            else:
+                target_schema = self._current_sf_schema_qualified()
+
+        out = snf_tr(
+            masked_sql,
+            use_snowflake_vars=widgets["use_set"].isChecked(),
+            comment_set=widgets["comment_set"].isChecked(),
+            target_database=target_database,
+            target_schema=target_schema,
+        )
+        if keep_braces:
+            out = _unmask_template_braces(out, brace_mapping)
+        return out
+
     def _conn_sf_database(self, conn) -> Optional[str]:
         value = getattr(conn, "database", None) or getattr(conn, "database_name", None)
         if value:
@@ -1370,20 +1453,21 @@ class SqlMigrationWindow(QMainWindow):
                 replacements[token] = literal
         return dict(sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True))
 
-    def _prepare_snowflake_sql_for_execution(self, conn, sql: str, params: Dict[str, str]) -> str:
+    def _prepare_snowflake_sql_for_execution(self, conn, sql: str, params: Dict[str, str], scope: str = "editor") -> str:
         out = sql or ""
         has_oracle_binds = bool(extract_oracle_params(out))
         has_oracle_object_names = bool(ORACLE_REF_REGEX.search(out or ""))
         if has_oracle_binds or has_oracle_object_names:
-            out = snf_tr(
-                out,
-                use_snowflake_vars=False,
-                comment_set=False,
-                target_database=self._conn_sf_database(conn),
-                target_schema=self._conn_sf_schema_qualified(conn),
-            )
+            out = self._translate_to_snowflake(out, scope=scope, conn=conn)
+        else:
+            widgets = self._translation_widgets(scope)
+            if widgets["keep_braces"].isChecked():
+                masked_sql, brace_mapping = _mask_template_braces(out)
+                out = oracle_params_to_snowflake_vars(masked_sql)
+                out = _unmask_template_braces(out, brace_mapping)
+            else:
+                out = oracle_params_to_snowflake_vars(out)
         explicit_set_vars = self._extract_explicit_set_vars(out)
-        out = oracle_params_to_snowflake_vars(out)
         if explicit_set_vars:
             filtered_params = {k: v for k, v in (params or {}).items() if str(k).upper() not in explicit_set_vars}
         else:
@@ -1425,12 +1509,12 @@ class SqlMigrationWindow(QMainWindow):
             self._active_oracle_exec_conn = None
             conn.close()
 
-    def _execute_snowflake_sql(self, sql: str, params: Dict[str, str]) -> pd.DataFrame:
+    def _execute_snowflake_sql(self, sql: str, params: Dict[str, str], scope: str = "editor") -> pd.DataFrame:
         conn = SnowflakeDbDriver.connect(**self.snowflake_session.connect_kwargs)
         self._active_snowflake_exec_conn = conn
         self._active_snowflake_query_id = None
         try:
-            exec_sql = self._prepare_snowflake_sql_for_execution(conn, sql, params)
+            exec_sql = self._prepare_snowflake_sql_for_execution(conn, sql, params, scope=scope)
             statements = self._split_sql_statements(exec_sql)
             if not statements:
                 return pd.DataFrame()
@@ -1483,7 +1567,7 @@ class SqlMigrationWindow(QMainWindow):
         if params is None:
             return
         self._run_db_job(
-            lambda: self._execute_snowflake_sql(sql, params),
+            lambda: self._execute_snowflake_sql(sql, params, scope="editor"),
             self.snowflake_results,
             "Snowflake",
             kind="snowflake",
@@ -1515,7 +1599,7 @@ class SqlMigrationWindow(QMainWindow):
         if params is None:
             return
         self._run_db_job(
-            lambda: self._execute_snowflake_sql(sql, params),
+            lambda: self._execute_snowflake_sql(sql, params, scope="folder"),
             self.snowflake_results_2,
             "Snowflake",
             kind="snowflake",
