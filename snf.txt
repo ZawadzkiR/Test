@@ -1,11 +1,15 @@
+import io
 import os
 import re
 import sys
 import html
-import builtins
+import time
+import queue
 import getpass
+import logging
+import threading
+import builtins
 from contextlib import redirect_stdout, redirect_stderr
-from io import TextIOBase
 
 import snowflake.connector
 
@@ -21,53 +25,46 @@ def _is_notebook() -> bool:
     try:
         from IPython import get_ipython
         shell = get_ipython()
-        if shell is None:
-            return False
-        return shell.__class__.__name__ in ("ZMQInteractiveShell",)
+        return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
     except Exception:
         return False
 
 
-def _show_open_link(url: str) -> None:
-    """
-    Pokazuje ukryty link jako 'Otwórz'.
-    W notebooku renderuje HTML, w terminalu próbuje hyperlink OSC8,
-    a jeśli terminal tego nie wspiera, pokazuje neutralny komunikat.
-    """
+def _clear_screen_secure() -> None:
+    if _is_notebook() and clear_output:
+        clear_output(wait=True)
+        return
+
+    if sys.stdout.isatty():
+        # czyści ekran i zwykle także scrollback w wielu terminalach
+        sys.stdout.write("\033[3J\033[2J\033[H")
+        sys.stdout.flush()
+
+
+def _show_login_link(url: str) -> None:
     if _is_notebook() and display and HTML:
-        safe_url = html.escape(url, quote=True)
-        display(HTML(
-            f'<div style="padding:6px 0;">'
-            f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">'
-            f'Otwórz</a> link logowania Snowflake'
-            f'</div>'
-        ))
+        safe = html.escape(url, quote=True)
+        display(HTML(f'<a href="{safe}" target="_blank" rel="noopener noreferrer">Otwórz link logowania Snowflake</a>'))
     else:
-        # Terminal: klikany link tylko w terminalach wspierających OSC8
-        if sys.stdout.isatty():
-            osc8 = f"\033]8;;{url}\033\\Otwórz\033]8;;\033\\"
-            print(f"{osc8} link logowania Snowflake")
-        else:
-            # Brak bezpiecznego klikacza; celowo nie wypisujemy pełnego URL
-            print("Link logowania Snowflake został wygenerowany. Otwórz go z outputu/logu connectora lub włącz tryb notebookowy.")
+        print("\nLink logowania Snowflake:")
+        print(url)
+        print("")
 
 
-class _MaskedSnowflakeOutput(TextIOBase):
+class _RedactingCapture(io.TextIOBase):
     """
     Przechwytuje output connectora:
-    - wyciąga pierwszy zewnętrzny URL SSO i pokazuje go jako 'Otwórz'
-    - blokuje wypisywanie surowych URL-i
-    - nie pokazuje końcowego localhost redirect
+    - wyciąga pierwszy URL logowania SSO
+    - nie wypisuje nic na stdout/stderr
+    - ignoruje localhost redirect i prompty
     """
     URL_RE = re.compile(r"https?://[^\s'\"<>]+")
     LOCALHOST_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?/?.*", re.IGNORECASE)
 
     def __init__(self):
         super().__init__()
-        self._buffer = ""
+        self.buffer = ""
         self.sso_url = None
-        self._shown = False
-        self._announced = False
 
     def writable(self):
         return True
@@ -75,99 +72,122 @@ class _MaskedSnowflakeOutput(TextIOBase):
     def write(self, s):
         if not isinstance(s, str):
             s = str(s)
+        self.buffer += s
 
-        self._buffer += s
-
-        # Szukamy URL-i w bieżącym buforze
-        for match in self.URL_RE.finditer(self._buffer):
-            url = match.group(0)
+        for m in self.URL_RE.finditer(self.buffer):
+            url = m.group(0)
             if self.LOCALHOST_RE.match(url):
                 continue
             if self.sso_url is None:
                 self.sso_url = url
-                if not self._shown:
-                    print("Rozpoczęto logowanie SSO.")
-                    _show_open_link(url)
-                    self._shown = True
 
-        # Nie wypisujemy surowego outputu connectora
-        # ale można dać jeden neutralny komunikat
-        if not self._announced and self._buffer.strip():
-            self._announced = True
-
-        # Czyścimy bufor, żeby nie trzymać sekretów w pamięci dłużej niż trzeba
-        if len(self._buffer) > 4096:
-            self._buffer = self._buffer[-1024:]
-
+        # nie wypisujemy nic dalej
+        if len(self.buffer) > 16384:
+            self.buffer = self.buffer[-4096:]
         return len(s)
 
     def flush(self):
         return None
 
 
-def connect_snowflake_externalbrowser_secure(
+def connect_snowflake_externalbrowser_safe(
     *,
     user: str,
     account: str,
-    warehouse: str = None,
-    database: str = None,
-    schema: str = None,
-    role: str = None,
-    **kwargs
+    warehouse: str | None = None,
+    database: str | None = None,
+    schema: str | None = None,
+    role: str | None = None,
+    timeout_show_link: float = 15.0,
+    **kwargs,
 ):
     """
-    Bezpieczniejszy wrapper na externalbrowser:
-    - maskuje output URL-i
-    - końcowy redirect URL pobiera przez getpass()
-    - działa w terminalu i notebooku
+    Bezpieczniejsze połączenie externalbrowser:
+    - nie pokazuje surowych URL-i w logach stdout/stderr
+    - pokazuje URL tylko kontrolowanie przez ten wrapper
+    - końcowy localhost URL pobiera przez getpass()
+    - po wpisaniu czyści widok
     """
 
-    # Zachowujemy oryginalne input
+    # 1) wyciszenie logów bibliotek
+    for name in [
+        "snowflake",
+        "snowflake.connector",
+        "botocore",
+        "boto3",
+        "urllib3",
+        "requests",
+    ]:
+        logger = logging.getLogger(name)
+        logger.handlers = []
+        logger.propagate = False
+        logger.setLevel(logging.CRITICAL)
+
+    capture = _RedactingCapture()
     original_input = builtins.input
+    result_q = queue.Queue()
 
-    def _secure_input(prompt=""):
-        prompt_lower = (prompt or "").lower()
-
-        # To jest kluczowy prompt Snowflake przy ręcznym dokańczaniu SSO
-        if "enter the url the sso url redirected you to" in prompt_lower:
-            if _is_notebook() and clear_output:
-                clear_output(wait=True)
-            value = getpass.getpass("Wklej końcowy redirect URL (localhost:...): ")
-            if _is_notebook() and clear_output:
-                clear_output(wait=True)
-            return value.strip()
-
-        # Każdy inny input zostawiamy normalnie
+    def _secure_input(prompt: str = ""):
+        prompt_l = (prompt or "").lower()
+        if "enter the url the sso url redirected you to" in prompt_l:
+            redirect_url = getpass.getpass("Wklej końcowy redirect URL (localhost:...): ").strip()
+            _clear_screen_secure()
+            return redirect_url
         return original_input(prompt)
 
-    masked_out = _MaskedSnowflakeOutput()
+    def _worker():
+        try:
+            with redirect_stdout(capture), redirect_stderr(capture):
+                conn = snowflake.connector.connect(
+                    user=user,
+                    account=account,
+                    authenticator="externalbrowser",
+                    warehouse=warehouse,
+                    database=database,
+                    schema=schema,
+                    role=role,
+                    **kwargs,
+                )
+            result_q.put(("ok", conn))
+        except Exception as e:
+            result_q.put(("err", e))
 
     try:
         builtins.input = _secure_input
 
-        with redirect_stdout(masked_out), redirect_stderr(masked_out):
-            conn = snowflake.connector.connect(
-                user=user,
-                account=account,
-                authenticator="externalbrowser",
-                warehouse=warehouse,
-                database=database,
-                schema=schema,
-                role=role,
-                **kwargs
-            )
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
 
-        # Dodatkowe czyszczenie ekranu po sukcesie
-        if _is_notebook() and clear_output:
-            clear_output(wait=True)
-        else:
-            # Linux/macOS terminal
-            if sys.stdout.isatty():
-                os.system("clear")
+        # 2) czekamy chwilę, aż connector wygeneruje URL
+        started = time.time()
+        shown = False
+        while t.is_alive():
+            if capture.sso_url and not shown:
+                _show_login_link(capture.sso_url)
+                shown = True
+            if not shown and (time.time() - started) > timeout_show_link:
+                print("Trwa inicjalizacja logowania Snowflake...")
+                shown = True
+            try:
+                status, payload = result_q.get_nowait()
+                if status == "ok":
+                    _clear_screen_secure()
+                    print("Połączenie ze Snowflake zostało zestawione.")
+                    return payload
+                raise payload
+            except queue.Empty:
+                time.sleep(0.1)
 
-        print("Połączenie ze Snowflake zostało zestawione.")
-        return conn
+        # odbiór wyniku po zakończeniu wątku
+        status, payload = result_q.get(timeout=1)
+        if status == "ok":
+            _clear_screen_secure()
+            print("Połączenie ze Snowflake zostało zestawione.")
+            return payload
+        raise payload
 
     finally:
         builtins.input = original_input
-
+        # aktywne wymazanie przechwyconego bufora
+        capture.buffer = ""
+        capture.sso_url = None
