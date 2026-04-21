@@ -1,0 +1,173 @@
+import os
+import re
+import sys
+import html
+import builtins
+import getpass
+from contextlib import redirect_stdout, redirect_stderr
+from io import TextIOBase
+
+import snowflake.connector
+
+try:
+    from IPython.display import display, HTML, clear_output
+except Exception:
+    display = None
+    HTML = None
+    clear_output = None
+
+
+def _is_notebook() -> bool:
+    try:
+        from IPython import get_ipython
+        shell = get_ipython()
+        if shell is None:
+            return False
+        return shell.__class__.__name__ in ("ZMQInteractiveShell",)
+    except Exception:
+        return False
+
+
+def _show_open_link(url: str) -> None:
+    """
+    Pokazuje ukryty link jako 'Otwórz'.
+    W notebooku renderuje HTML, w terminalu próbuje hyperlink OSC8,
+    a jeśli terminal tego nie wspiera, pokazuje neutralny komunikat.
+    """
+    if _is_notebook() and display and HTML:
+        safe_url = html.escape(url, quote=True)
+        display(HTML(
+            f'<div style="padding:6px 0;">'
+            f'<a href="{safe_url}" target="_blank" rel="noopener noreferrer">'
+            f'Otwórz</a> link logowania Snowflake'
+            f'</div>'
+        ))
+    else:
+        # Terminal: klikany link tylko w terminalach wspierających OSC8
+        if sys.stdout.isatty():
+            osc8 = f"\033]8;;{url}\033\\Otwórz\033]8;;\033\\"
+            print(f"{osc8} link logowania Snowflake")
+        else:
+            # Brak bezpiecznego klikacza; celowo nie wypisujemy pełnego URL
+            print("Link logowania Snowflake został wygenerowany. Otwórz go z outputu/logu connectora lub włącz tryb notebookowy.")
+
+
+class _MaskedSnowflakeOutput(TextIOBase):
+    """
+    Przechwytuje output connectora:
+    - wyciąga pierwszy zewnętrzny URL SSO i pokazuje go jako 'Otwórz'
+    - blokuje wypisywanie surowych URL-i
+    - nie pokazuje końcowego localhost redirect
+    """
+    URL_RE = re.compile(r"https?://[^\s'\"<>]+")
+    LOCALHOST_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?/?.*", re.IGNORECASE)
+
+    def __init__(self):
+        super().__init__()
+        self._buffer = ""
+        self.sso_url = None
+        self._shown = False
+        self._announced = False
+
+    def writable(self):
+        return True
+
+    def write(self, s):
+        if not isinstance(s, str):
+            s = str(s)
+
+        self._buffer += s
+
+        # Szukamy URL-i w bieżącym buforze
+        for match in self.URL_RE.finditer(self._buffer):
+            url = match.group(0)
+            if self.LOCALHOST_RE.match(url):
+                continue
+            if self.sso_url is None:
+                self.sso_url = url
+                if not self._shown:
+                    print("Rozpoczęto logowanie SSO.")
+                    _show_open_link(url)
+                    self._shown = True
+
+        # Nie wypisujemy surowego outputu connectora
+        # ale można dać jeden neutralny komunikat
+        if not self._announced and self._buffer.strip():
+            self._announced = True
+
+        # Czyścimy bufor, żeby nie trzymać sekretów w pamięci dłużej niż trzeba
+        if len(self._buffer) > 4096:
+            self._buffer = self._buffer[-1024:]
+
+        return len(s)
+
+    def flush(self):
+        return None
+
+
+def connect_snowflake_externalbrowser_secure(
+    *,
+    user: str,
+    account: str,
+    warehouse: str = None,
+    database: str = None,
+    schema: str = None,
+    role: str = None,
+    **kwargs
+):
+    """
+    Bezpieczniejszy wrapper na externalbrowser:
+    - maskuje output URL-i
+    - końcowy redirect URL pobiera przez getpass()
+    - działa w terminalu i notebooku
+    """
+
+    # Zachowujemy oryginalne input
+    original_input = builtins.input
+
+    def _secure_input(prompt=""):
+        prompt_lower = (prompt or "").lower()
+
+        # To jest kluczowy prompt Snowflake przy ręcznym dokańczaniu SSO
+        if "enter the url the sso url redirected you to" in prompt_lower:
+            if _is_notebook() and clear_output:
+                clear_output(wait=True)
+            value = getpass.getpass("Wklej końcowy redirect URL (localhost:...): ")
+            if _is_notebook() and clear_output:
+                clear_output(wait=True)
+            return value.strip()
+
+        # Każdy inny input zostawiamy normalnie
+        return original_input(prompt)
+
+    masked_out = _MaskedSnowflakeOutput()
+
+    try:
+        builtins.input = _secure_input
+
+        with redirect_stdout(masked_out), redirect_stderr(masked_out):
+            conn = snowflake.connector.connect(
+                user=user,
+                account=account,
+                authenticator="externalbrowser",
+                warehouse=warehouse,
+                database=database,
+                schema=schema,
+                role=role,
+                **kwargs
+            )
+
+        # Dodatkowe czyszczenie ekranu po sukcesie
+        if _is_notebook() and clear_output:
+            clear_output(wait=True)
+        else:
+            # Linux/macOS terminal
+            if sys.stdout.isatty():
+                os.system("clear")
+
+        print("Połączenie ze Snowflake zostało zestawione.")
+        return conn
+
+    finally:
+        builtins.input = original_input
+
