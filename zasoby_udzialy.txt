@@ -1,0 +1,359 @@
+#!/usr/bin/env python
+"""
+Zasoby sieciowe używane przez kod: tabela  ZASÓB | ACCESS  (r = tylko odczyt, rw = odczyt i zapis).
+
+Korzysta ze skanera Lineage Nexus (folder `nexus` z paczki), więc rozumie to samo co aplikacja:
+  - qs.open(path, "rb"/"wb"), qs.write(df.to_excel, path), qs.read, qs.copy (+ własne z nexus.json),
+  - argparse: ścieżki z wartości domyślnych (--input/--output), także przekazywane do funkcji w innych plikach,
+  - bez qs też: pd.read_* / df.to_*, open(..., "w"), shutil.copy/move, os.makedirs/remove, glob, os.path.join, f-stringi,
+  - pathlib: Path / WindowsPath / PureWindowsPath (także z aliasem: from pathlib import WindowsPath as WP),
+    "/" i joinpath, .parent, with_name/with_suffix, metody .open("w"), .read_text(), .write_text(), .mkdir(),
+    .glob(), .iterdir(), .rename(); argparse z type=WindowsPath i default=WindowsPath(r"\\\\srv\\x"),
+  - notebooki .ipynb (wyłączysz przez --bez-notebookow).
+Dodatkowo przegląda wszystkie stałe tekstowe w kodzie, żeby nie zgubić udziałów użytych w inny sposób.
+
+Wynik zagregowany do poziomu udziału: \\\\serwer\\udzial (podkatalogi i pliki są pomijane).
+Udział dostaje "rw", jeśli GDZIEKOLWIEK jest do niego zapis; "r", jeśli tylko odczyt.
+Gwiazdka (r*) = operacji nie dało się ustalić (ścieżka tylko jako stała w kodzie) – sprawdź ręcznie.
+
+Użycie (z folderu, w którym leży folder `nexus`):
+  python zasoby_udzialy.py --root D:/KatalogA
+  python zasoby_udzialy.py --config moje.json                    # te same io_functions/exclude co w aplikacji
+  python zasoby_udzialy.py --root D:/KatalogA -o zasoby.csv --szczegoly
+  python zasoby_udzialy.py --root D:/KatalogA --dysk S:=\\\\srv-fs01\\hurt   # dyski mapowane -> udział
+  python zasoby_udzialy.py --root D:/KatalogA --per-repo          # osobno dla każdego repozytorium
+
+Wymaga tylko Pythona 3.10+ (bez internetu, bez pip).
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import csv
+import os
+import re
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------------------------- import skanera
+def _import_nexus(extra: str | None):
+    here = Path(__file__).resolve().parent
+    cands = [extra, os.environ.get("NEXUS_HOME"), here, here.parent, Path.cwd(), here / "nexus"]
+    for c in cands:
+        if c and (Path(c) / "nexus" / "scan" / "project.py").exists():
+            sys.path.insert(0, str(Path(c).resolve()))
+            break
+    try:
+        from nexus.config import load_config
+        from nexus.scan import project
+        from nexus.scan.notebook import parse_notebook
+        return load_config, project, parse_notebook
+    except ImportError as e:
+        sys.exit("Nie znaleziono skanera Lineage Nexus (folder 'nexus' z plikiem nexus/scan/project.py).\n"
+                 "Połóż ten skrypt obok folderu 'nexus' z paczki albo podaj --nexus ŚCIEŻKA.\n"
+                 f"({e})")
+
+
+# Dodatkowe funkcje IO dokładane, jeśli nie ma ich już w konfiguracji.
+# kind: read/write; src/dst: kopiowanie. Wzorzec "qs.copy" pasuje też do "moja.qs.copy".
+EXTRA_IO = [
+    {"call": "qs.copy", "src_arg": 0, "dst_arg": 1},
+    {"call": "qs.move", "src_arg": 0, "dst_arg": 1},
+    {"call": "qs.upload", "path_arg": 1, "kind": "write"},
+    {"call": "qs.download", "path_arg": 0, "kind": "read"},
+    *[{"call": f"qs.{n}", "path_arg": 0, "kind": "read"} for n in ("listdir", "ls", "exists", "isfile", "isdir", "glob", "walk", "stat", "read_excel", "read_csv", "get")],
+    *[{"call": f"qs.{n}", "path_arg": 0, "kind": "write"} for n in ("mkdir", "makedirs", "remove", "delete", "rm", "rmdir", "unlink", "save", "put", "touch")],
+    *[{"call": n, "path_arg": 0, "kind": "read"} for n in ("os.listdir", "os.scandir", "os.walk", "glob.glob", "glob.iglob", "os.path.exists", "os.path.isfile", "os.path.isdir", "os.stat")],
+    *[{"call": n, "path_arg": 0, "kind": "write"} for n in ("os.makedirs", "os.mkdir", "os.remove", "os.unlink", "os.rmdir", "shutil.rmtree")],
+    {"call": "os.rename", "src_arg": 0, "dst_arg": 1},
+    {"call": "os.replace", "src_arg": 0, "dst_arg": 1},
+]
+
+# metody pathlib (Path / WindowsPath / PureWindowsPath)
+PATH_READ = {"read_text", "read_bytes", "iterdir", "glob", "rglob", "exists", "is_file", "is_dir", "stat"}
+PATH_WRITE = {"write_text", "write_bytes", "mkdir", "touch", "unlink", "rmdir", "rename", "replace"}
+PATH_CTORS = ("Path", "PurePath", "PureWindowsPath", "WindowsPath", "PosixPath", "PurePosixPath")
+
+# nazwy funkcji/metod, które przy stałej ścieżce oznaczają zapis (drugi przebieg)
+WRITE_NAMES = re.compile(r"(^|_)(write|save|dump|put|upload|mkdir|makedirs|remove|unlink|delete|rmtree|rmdir|rm|touch|move|rename|replace)($|_)|^to_", re.I)
+READ_NAMES = re.compile(r"(^|_)(read|open|load|get|download|listdir|scandir|ls|glob|walk|exists|isfile|isdir|stat|copy)($|_)|^read_", re.I)
+
+
+# ---------------------------------------------------------------------------------------------- ścieżka -> udział
+UNC_RX = re.compile(r"^(?:\\\\|//)(?P<srv>[^\\/]+)[\\/](?P<share>[^\\/]+)")
+DRIVE_RX = re.compile(r"^(?P<drv>[A-Za-z]):[\\/]")
+
+
+def share_of(path: str, drives: dict, root: Path) -> tuple[str, str] | None:
+    """(klucz, nazwa wyświetlana) udziału albo None (ścieżka lokalna/względna).
+    Klucz bez wielkości liter – Windows ich nie rozróżnia."""
+    p = (path or "").strip().strip('"\'')
+    if not p:
+        return None
+    m = DRIVE_RX.match(p)
+    if m:
+        drv = m.group("drv").upper() + ":"
+        if drv in drives:
+            p = drives[drv] + p[2:]
+        else:
+            try:
+                if Path(p).resolve().is_relative_to(root):     # plik w samym repozytorium – nie zasób
+                    return None
+            except (OSError, ValueError):
+                pass
+            return drv.lower(), drv + "\\"
+    m = UNC_RX.match(p)
+    if not m:
+        return None
+    srv, share = m.group("srv"), m.group("share")
+    disp = f"\\\\{srv}\\{share}"
+    return disp.lower(), disp
+
+
+def unresolved(path: str) -> bool:
+    """Serwer albo udział budowany w runtime, np. \\\\{SERWER}\\x albo {args.out}."""
+    m = UNC_RX.match(path or "")
+    return bool(m and ("{" in m.group("srv") or "{" in m.group("share"))) or (path or "").startswith("{")
+
+
+# ---------------------------------------------------------------------------------------------- drugi przebieg: stałe
+def literal_hits(text: str, is_nb: bool, parse_notebook):
+    """[(ścieżka, 'read'|'write'|None, linia, nazwa wywołania)] dla stałych tekstowych wyglądających jak UNC/dysk."""
+    if is_nb:
+        try:
+            text = parse_notebook(text)["code"]
+        except Exception:  # noqa: BLE001
+            return []
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        # plik, którego nie da się sparsować – choć regex po tekście
+        return [(m.group(0), None, text[:m.start()].count("\n") + 1, "")
+                for m in re.finditer(r"(?:\\\\\\\\|\\\\|//)[\w.$-]+[\\/]+[\w.$ -]+", text)]
+    aliases = {al.asname for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "pathlib"
+               for al in n.names if al.asname}
+    parents = {}
+    for n in ast.walk(tree):
+        for c in ast.iter_child_nodes(n):
+            parents[c] = n
+    out = []
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Constant) and isinstance(n.value, str)):
+            continue
+        s = n.value.strip()
+        if not (UNC_RX.match(s) or DRIVE_RX.match(s)):
+            continue
+        if isinstance(parents.get(n), ast.JoinedStr):       # f"\\srv\x\{a}" – kawałek f-stringu
+            pass
+        # najbliższe wywołanie, w którego argumentach jest ta stała
+        kind, via, cur = None, "", n
+        while cur in parents:
+            par = parents[cur]
+            # metoda wywołana na ścieżce: WindowsPath(r"\\srv\x").mkdir() / .open("w") / .glob("*")
+            gp = parents.get(par)
+            if isinstance(par, ast.Attribute) and isinstance(gp, ast.Call) and gp.func is par:
+                m = par.attr
+                mode = next((x.value for x in list(gp.args[:1]) + [k.value for k in gp.keywords if k.arg == "mode"]
+                             if isinstance(x, ast.Constant) and isinstance(x.value, str)), "r")
+                if m == "open":
+                    kind = "write" if any(c in mode for c in "wax+") else "read"
+                elif m in PATH_WRITE:
+                    kind = "write"
+                elif m in PATH_READ:
+                    kind = "read"
+                if kind:
+                    via = f"Path.{m}"
+                    break
+                cur = gp
+                continue
+            if isinstance(par, ast.Call) and cur is not par.func:
+                f = par.func
+                name = f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
+                full = ast.unparse(f) if hasattr(ast, "unparse") else name
+                mode = None
+                for a in list(par.args[1:2]) + [k.value for k in par.keywords if k.arg == "mode"]:
+                    if isinstance(a, ast.Constant) and isinstance(a.value, str) and re.fullmatch(r"[rwabxt+]{1,3}", a.value):
+                        mode = a.value
+                if name == "open" or name.endswith("open"):
+                    kind = "write" if mode and any(c in mode for c in "wax+") else "read"
+                elif name in ("copy", "copy2", "copyfile", "move", "rename", "replace") and len(par.args) >= 2:
+                    kind = "write" if cur is par.args[1] or _contains(par.args[1], n) else ("write" if name in ("move", "rename") else "read")
+                elif WRITE_NAMES.search(name):
+                    kind = "write"
+                elif READ_NAMES.search(name):
+                    kind = "read"
+                if name in PATH_CTORS or name in aliases or name in ("join", "joinpath", "str", "format", "fspath", "with_name", "with_suffix"):
+                    cur = par          # konstruktor ścieżki – patrz wyżej, co się z nią dzieje
+                    continue
+                via = full
+                if kind:
+                    break
+            if isinstance(par, (ast.stmt,)):
+                break
+            cur = par
+        out.append((s, kind, getattr(n, "lineno", 0), via))
+    return out
+
+
+def _contains(tree, node):
+    return any(x is node for x in ast.walk(tree))
+
+
+# ---------------------------------------------------------------------------------------------- główna część
+def main():
+    ap = argparse.ArgumentParser(description="Tabela udziałów sieciowych używanych przez kod (zasób | access).")
+    ap.add_argument("--root", help="katalog z repozytoriami, np. D:/KatalogA")
+    ap.add_argument("--config", help="nexus.json (io_functions, exclude, root) – opcjonalnie")
+    ap.add_argument("--nexus", help="folder zawierający folder 'nexus' (jeśli skrypt leży gdzie indziej)")
+    ap.add_argument("-o", "--out", help="zapisz tabelę do CSV (średnik, UTF-8 – otwiera się w Excelu)")
+    ap.add_argument("--szczegoly", action="store_true", help="pokaż, skąd wziął się każdy udział (plik:linia, proces)")
+    ap.add_argument("--per-repo", action="store_true", help="osobne wiersze dla każdego repozytorium")
+    ap.add_argument("--dysk", action="append", default=[], metavar="S:=\\\\SERWER\\UDZIAL",
+                    help="mapowanie litery dysku na udział (można powtarzać)")
+    ap.add_argument("--tylko-unc", action="store_true", help="pomiń ścieżki z literą dysku (S:\\...)")
+    ap.add_argument("--bez-notebookow", action="store_true", help="tylko pliki .py (bez .ipynb)")
+    ap.add_argument("--bez-stalych", action="store_true", help="bez drugiego przebiegu po stałych tekstowych")
+    a = ap.parse_args()
+    if not a.root and not a.config:
+        ap.error("podaj --root KATALOG albo --config nexus.json")
+
+    load_config, project, parse_notebook = _import_nexus(a.nexus)
+    cfg = load_config(a.config, root_override=a.root)
+    have = {f["call"] for f in cfg.io_functions}
+    cfg.io_functions = list(cfg.io_functions) + [f for f in EXTRA_IO if f["call"] not in have]
+    root = Path(cfg.root).resolve()
+    if not root.is_dir():
+        sys.exit(f"Katalog nie istnieje: {root}")
+    drives = {}
+    for d in a.dysk:
+        k, _, v = d.partition("=")
+        drives[k.strip().upper().rstrip("\\/").rstrip(":") + ":"] = v.strip().rstrip("\\/")
+
+    # --- 1) pełna analiza skanerem (argparse, qs.*, przepływ ścieżek między plikami)
+    g = project.scan(cfg, use_git=False)
+    nodes = {n["id"]: n for n in g["nodes"]}
+
+    def owner_info(pid):
+        n = nodes.get(pid, {})
+        return n.get("label", pid), (n.get("repo") or pid.split(":", 1)[-1].split("/")[0])
+
+    rows = []        # (repo, klucz, wyświetlana, rodzaj r/w, pewne?, skąd, proces)
+    found = set()    # (plik, udział) już ustalone przez pełną analizę
+    skipped = []
+    for e in g["edges"]:
+        if e["kind"] not in ("reads", "writes"):
+            continue
+        fid, pid = (e["source"], e["target"]) if e["kind"] == "reads" else (e["target"], e["source"])
+        fn = nodes.get(fid)
+        if not fn or fn.get("type") != "file":
+            continue
+        path = (fn.get("meta") or {}).get("path") or fn.get("label", "")
+        is_nb = (nodes.get(pid, {}).get("type") == "notebook") or str(nodes.get(pid, {}).get("entry", "")).endswith(".ipynb")
+        if a.bez_notebookow and is_nb:
+            continue
+        label, repo = owner_info(pid)
+        where = ", ".join(f"{repo}/{x}" for x in (e.get("lines") or [])) or "?"
+        via = "; ".join(e.get("via") or [])
+        if unresolved(path):
+            skipped.append((path, label, where))
+            continue
+        sh = share_of(path, drives, root)
+        if not sh or (a.tylko_unc and not sh[1].startswith("\\\\")):
+            continue
+        rows.append((repo, sh[0], sh[1], "w" if e["kind"] == "writes" else "r", True, f"{where}  [{via}]", label))
+        for x in (e.get("lines") or []):                 # do pominięcia duplikatów w drugim przebiegu
+            found.add((f"{repo}/{x.split(':')[0].split(' [')[0]}", sh[0]))
+
+    # --- 2) stałe tekstowe w kodzie, których analiza nie powiązała z operacją
+    if not a.bez_stalych:
+        exclude = project.ALWAYS_EXCLUDE | set(cfg.exclude or [])
+        exts = (".py",) if a.bez_notebookow else (".py", ".ipynb")
+        for dp, dns, fns in os.walk(root):
+            dns[:] = [d for d in dns if d not in exclude and not d.startswith(".")]
+            for fn_ in fns:
+                if not fn_.lower().endswith(exts):
+                    continue
+                f = Path(dp) / fn_
+                try:
+                    text = f.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    text = f.read_text(encoding="cp1250", errors="replace")
+                except OSError:
+                    continue
+                rel = f.relative_to(root).as_posix()
+                repo = rel.split("/")[0]
+                for s, kind, line, via in literal_hits(text, fn_.lower().endswith(".ipynb"), parse_notebook):
+                    if unresolved(s):
+                        continue
+                    sh = share_of(s, drives, root)
+                    if not sh or (a.tylko_unc and not sh[1].startswith("\\\\")) or (rel, sh[0]) in found:
+                        continue
+                    rows.append((repo, sh[0], sh[1], {"write": "w", "read": "r"}.get(kind, "?"), kind is not None,
+                                 f"{rel}:{line}  [{via or 'stała'}]", "–"))
+
+    # --- agregacja per udział (opcjonalnie per repo)
+    agg = {}
+    for repo, key, disp, rw, sure, src, proc in rows:
+        k = (repo if a.per_repo else "", key)
+        d = agg.setdefault(k, {"disp": disp, "r": False, "w": False, "sure": False, "src": [], "procs": set()})
+        if rw == "w":
+            d["w"] = d["r"] = True     # zapis na udziale w praktyce oznacza też odczyt (rw)
+        elif rw == "r":
+            d["r"] = True
+        d["sure"] |= sure
+        if src not in d["src"]:
+            d["src"].append(src)
+        if proc != "–":
+            d["procs"].add(proc)
+
+    def access(d):
+        acc = "rw" if d["w"] else "r"
+        return acc + ("" if d["sure"] else "*")
+
+    out = sorted(agg.items(), key=lambda kv: (kv[0][0], kv[1]["disp"].lower()))
+
+    # --- wydruk
+    if not out:
+        print("\nNie znaleziono ścieżek do udziałów sieciowych.")
+    else:
+        hdr = (["repo"] if a.per_repo else []) + ["zasób", "access"]
+        data = [([k[0]] if a.per_repo else []) + [d["disp"], access(d)] for k, d in out]
+        w = [max(len(str(r[i])) for r in [hdr] + data) for i in range(len(hdr))]
+        line = "-|-".join("-" * x for x in w)
+        print()
+        print(" | ".join(h.ljust(w[i]) for i, h in enumerate(hdr)))
+        print(line)
+        for r in data:
+            print(" | ".join(str(c).ljust(w[i]) for i, c in enumerate(r)))
+        if any(not d["sure"] for _, d in out):
+            print("\n* operacja nieustalona – ścieżka występuje tylko jako stała w kodzie; sprawdź ręcznie (--szczegoly).")
+        print(f"\nudziałów: {len(out)}  (rw: {sum(1 for _, d in out if d['w'])}, r: {sum(1 for _, d in out if not d['w'])})")
+
+    if a.szczegoly:
+        for k, d in out:
+            print(f"\n{d['disp']}  [{access(d)}]" + (f"  repo: {k[0]}" if a.per_repo else ""))
+            if d["procs"]:
+                print("  procesy: " + ", ".join(sorted(d["procs"])))
+            for s in d["src"][:40]:
+                print("   - " + s)
+            if len(d["src"]) > 40:
+                print(f"   … i {len(d['src']) - 40} więcej")
+
+    if skipped:
+        print(f"\nNierozwiązane ścieżki (serwer/udział znany dopiero w trakcie działania): {len(skipped)}")
+        for p, proc, where in skipped[:15]:
+            print(f"   - {p}   ({proc}, {where})")
+
+    if a.out:
+        with open(a.out, "w", newline="", encoding="utf-8-sig") as fh:
+            wr = csv.writer(fh, delimiter=";")
+            wr.writerow((["repo"] if a.per_repo else []) + ["zasob", "access", "procesy", "zrodla"])
+            for k, d in out:
+                wr.writerow(([k[0]] if a.per_repo else []) + [d["disp"], access(d), ", ".join(sorted(d["procs"])), " | ".join(d["src"])])
+        print(f"\nZapisano {a.out}")
+
+
+if __name__ == "__main__":
+    main()
